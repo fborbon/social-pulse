@@ -166,7 +166,7 @@ async def fetch_devto(limit=25):
 # ── Lemmy ─────────────────────────────────────────────────────────────────────
 async def fetch_lemmy(limit=25):
     try:
-        async with aiohttp.ClientSession() as s:
+        async with aiohttp.ClientSession(headers={"Accept-Encoding": "gzip, deflate"}) as s:
             data = await _get_json(
                 s, f"https://lemmy.world/api/v3/post/list?type_=All&sort=Hot&limit={limit}"
             )
@@ -274,8 +274,11 @@ async def fetch_gdelt(limit_per_query=4):
     queries = ["politics government", "economy inflation", "technology",
                "health pandemic", "climate environment", "crime police"]
     try:
+        # GDELT enforces 1 request / 5 seconds
         async with aiohttp.ClientSession() as s:
-            for query in queries:
+            for i, query in enumerate(queries):
+                if i > 0:
+                    await asyncio.sleep(5.5)
                 try:
                     data = await _get_json(s, "https://api.gdeltproject.org/api/v2/doc/doc", params={
                         "query": f"{query} sourcelang:english",
@@ -309,7 +312,8 @@ async def fetch_sec_edgar(limit_per_query=4):
     since = (datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%d")
     queries = ["earnings revenue", "merger acquisition", "layoffs workforce"]
     try:
-        async with aiohttp.ClientSession() as s:
+        headers = {"User-Agent": "social-pulse research@socialpulse.example.com"}
+        async with aiohttp.ClientSession(headers=headers) as s:
             for query in queries:
                 try:
                     data = await _get_json(s, "https://efts.sec.gov/LATEST/search-index", params={

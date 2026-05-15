@@ -12,7 +12,9 @@ async def fetch_sec_edgar(limit_per_query: int = 5) -> list[RawPost]:
     seen: set[str] = set()
     since = (datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%d")
 
-    async with aiohttp.ClientSession() as s:
+    # SEC requires a descriptive User-Agent per their fair-access policy
+    headers = {"User-Agent": "social-pulse research@socialpulse.example.com"}
+    async with aiohttp.ClientSession(headers=headers) as s:
         for query in QUERIES:
             params = {
                 "q":         query,

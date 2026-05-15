@@ -15,8 +15,11 @@ async def fetch_gdelt(limit_per_query: int = 5) -> list[RawPost]:
     posts: list[RawPost] = []
     seen: set[str] = set()
 
+    # GDELT enforces 1 request / 5 seconds — run sequentially with delay
     async with aiohttp.ClientSession() as s:
-        for query in QUERIES:
+        for i, query in enumerate(QUERIES):
+            if i > 0:
+                await asyncio.sleep(5.5)
             params = {
                 "query":      f"{query} sourcelang:english",
                 "mode":       "artlist",

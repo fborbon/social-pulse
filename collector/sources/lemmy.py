@@ -9,8 +9,9 @@ LEMMY_INSTANCE = "https://lemmy.world"
 async def fetch_lemmy(limit: int = 25) -> list[RawPost]:
     url = f"{LEMMY_INSTANCE}/api/v3/post/list?type_=All&sort=Hot&limit={limit}&page=1"
     try:
+        headers = {"Accept-Encoding": "gzip, deflate"}
         async with aiohttp.ClientSession() as s:
-            async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            async with s.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as r:
                 data = await r.json()
     except Exception:
         return []
