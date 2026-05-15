@@ -135,15 +135,25 @@ async def fetch_lobsters(limit=25):
     try:
         async with aiohttp.ClientSession() as s:
             items = await _get_json(s, "https://lobste.rs/hottest.json")
-        return [
-            {"platform": "lobsters", "external_id": i["short_id"],
-             "author": i.get("submitter_user", {}).get("username"),
-             "title": i.get("title"), "body": i.get("description") or i.get("title", ""),
-             "url": i.get("url") or f"https://lobste.rs/s/{i['short_id']}",
-             "raw_score": i.get("score", 0), "timestamp": _ts(i.get("created_at", ""))}
-            for i in items[:limit] if i.get("title")
-        ]
-    except Exception:
+        posts = []
+        for i in items[:limit]:
+            if not i.get("title"):
+                continue
+            su = i.get("submitter_user")
+            author = su.get("username") if isinstance(su, dict) else None
+            posts.append({
+                "platform":    "lobsters",
+                "external_id": i["short_id"],
+                "author":      author,
+                "title":       i.get("title"),
+                "body":        i.get("description_plain") or i.get("description") or i.get("title", ""),
+                "url":         i.get("url") or f"https://lobste.rs/s/{i['short_id']}",
+                "raw_score":   i.get("score", 0),
+                "timestamp":   _ts(i.get("created_at", "")),
+            })
+        return posts
+    except Exception as e:
+        print(f"  lobsters ERROR: {type(e).__name__}: {e}", flush=True)
         return []
 
 

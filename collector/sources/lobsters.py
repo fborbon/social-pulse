@@ -15,17 +15,19 @@ async def fetch_lobsters(limit: int = 25) -> list[RawPost]:
 
     posts = []
     for item in items[:limit]:
-        body = item.get("description") or item.get("title") or ""
+        body = item.get("description_plain") or item.get("description") or item.get("title") or ""
         if not body:
             continue
+        su = item.get("submitter_user")
+        author = su.get("username") if isinstance(su, dict) else None
         try:
-            ts = datetime.fromisoformat(item["created_at"].replace("Z", "+00:00"))
+            ts = datetime.fromisoformat(item["created_at"])
         except Exception:
             ts = datetime.now(tz=timezone.utc)
         posts.append(RawPost(
             platform="lobsters",
             external_id=item["short_id"],
-            author=item.get("submitter_user", {}).get("username"),
+            author=author,
             title=item.get("title"),
             body=body,
             url=item.get("url") or f"https://lobste.rs/s/{item['short_id']}",
