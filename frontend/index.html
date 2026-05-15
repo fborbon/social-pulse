@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Social Pulse</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+  <style>
+    body { background: #0f172a; color: #e2e8f0; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 0.75rem; }
+    .tag { display:inline-block; padding:2px 8px; border-radius:9999px; font-size:.7rem; font-weight:600; }
+    .tag-pos { background:#14532d; color:#86efac; }
+    .tag-neg { background:#4c0519; color:#fca5a5; }
+    .tag-neu { background:#1e3a5f; color:#93c5fd; }
+    .pill { display:inline-block; padding:1px 8px; border-radius:9999px; font-size:.65rem; background:#334155; color:#94a3b8; }
+    #live-ticker::-webkit-scrollbar { display:none; }
+    .fade-in { animation: fadeIn .4s ease; }
+    @keyframes fadeIn { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
+    .spinner { border:3px solid #334155; border-top-color:#6366f1; border-radius:50%; width:28px; height:28px; animation:spin .8s linear infinite; margin:2rem auto; }
+    @keyframes spin { to{transform:rotate(360deg)} }
+  </style>
+</head>
+<body class="min-h-screen p-4 md:p-8">
+
+  <!-- Header -->
+  <div class="flex items-center justify-between mb-8">
+    <div>
+      <h1 class="text-2xl font-bold text-white tracking-tight">
+        <span class="text-indigo-400">Social</span> Pulse
+      </h1>
+      <p class="text-slate-400 text-sm mt-0.5">Real-time social intelligence dashboard</p>
+    </div>
+    <div class="flex items-center gap-3">
+      <span id="ws-badge" class="tag tag-neu">● connecting</span>
+      <button onclick="loadAll()"
+        class="text-sm px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition">
+        Refresh
+      </button>
+    </div>
+  </div>
+
+  <!-- Stats row -->
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8" id="stat-cards">
+    <div class="card p-4"><div class="spinner"></div></div>
+    <div class="card p-4"></div>
+    <div class="card p-4"></div>
+    <div class="card p-4"></div>
+  </div>
+
+  <!-- Charts + Summary -->
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+
+    <!-- Bar chart -->
+    <div class="card p-5">
+      <h2 class="text-sm font-semibold text-slate-300 mb-4 uppercase tracking-wider">Posts by Topic</h2>
+      <canvas id="topicChart" height="220"></canvas>
+    </div>
+
+    <!-- Daily summary -->
+    <div class="card p-5">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">Daily Summary</h2>
+        <select id="summary-topic-select"
+          class="bg-slate-700 text-slate-200 text-xs rounded px-2 py-1 border border-slate-600 focus:outline-none"
+          onchange="loadSummary(this.value)"></select>
+      </div>
+      <div id="summary-box"><div class="spinner"></div></div>
+    </div>
+  </div>
+
+  <!-- Posts feed -->
+  <div class="card p-5 mb-8">
+    <div class="flex flex-wrap items-center gap-3 mb-4">
+      <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">Posts</h2>
+      <select id="filter-topic"
+        class="bg-slate-700 text-slate-200 text-xs rounded px-2 py-1 border border-slate-600 focus:outline-none"
+        onchange="loadPosts()">
+        <option value="">All topics</option>
+      </select>
+      <select id="filter-sentiment"
+        class="bg-slate-700 text-slate-200 text-xs rounded px-2 py-1 border border-slate-600 focus:outline-none"
+        onchange="loadPosts()">
+        <option value="">All sentiments</option>
+        <option value="positive">Positive</option>
+        <option value="neutral">Neutral</option>
+        <option value="negative">Negative</option>
+      </select>
+    </div>
+    <div id="posts-list"><div class="spinner"></div></div>
+  </div>
+
+  <!-- Live ticker -->
+  <div class="card p-4">
+    <div class="flex items-center gap-2 mb-3">
+      <span class="w-2 h-2 rounded-full bg-indigo-400 animate-pulse"></span>
+      <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">Live Stream</h2>
+      <span class="text-xs text-slate-500">(new enriched posts appear here in real time)</span>
+    </div>
+    <div id="live-ticker" class="space-y-2 max-h-48 overflow-y-auto">
+      <p class="text-slate-500 text-sm">Waiting for live posts…</p>
+    </div>
+  </div>
+
+<script>
+const GQL = '/graphql';
+
+async function gql(query) {
+  const r = await fetch(GQL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query }),
+  });
+  return r.json();
+}
+
+// ── Chart ─────────────────────────────────────────────────────────────────────
+let topicChartInst = null;
+
+function renderChart(stats) {
+  const labels = stats.map(s => s.topic);
+  const pos    = stats.map(s => s.positivePct);
+  const neu    = stats.map(s => s.neutralPct);
+  const neg    = stats.map(s => s.negativePct);
+
+  if (topicChartInst) topicChartInst.destroy();
+  topicChartInst = new Chart(document.getElementById('topicChart'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Positive', data: pos, backgroundColor: '#22c55e', borderRadius: 4 },
+        { label: 'Neutral',  data: neu, backgroundColor: '#6366f1', borderRadius: 4 },
+        { label: 'Negative', data: neg, backgroundColor: '#ef4444', borderRadius: 4 },
+      ],
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { labels: { color: '#94a3b8', font: { size: 11 } } } },
+      scales: {
+        x: { stacked: true, ticks: { color: '#94a3b8' }, grid: { color: '#1e293b' } },
+        y: { stacked: true, ticks: { color: '#94a3b8', callback: v => v + '%' }, grid: { color: '#334155' }, max: 100 },
+      },
+    },
+  });
+}
+
+// ── Stat cards ────────────────────────────────────────────────────────────────
+function renderStatCards(stats, posts) {
+  const totalPosts  = stats.reduce((a, s) => a + s.postCount, 0);
+  const topTopic    = stats[0]?.topic ?? '—';
+  const posAvg      = stats.length ? Math.round(stats.reduce((a,s)=>a+s.positivePct,0)/stats.length) : 0;
+  const topPost     = [...posts].sort((a,b)=>b.rawScore-a.rawScore)[0];
+
+  const cards = [
+    { label: 'Total Posts',    value: totalPosts,          sub: 'collected today' },
+    { label: 'Topics Active',  value: stats.length,        sub: 'matched topics' },
+    { label: 'Top Topic',      value: topTopic,            sub: `${stats[0]?.postCount ?? 0} posts` },
+    { label: 'Avg Positive',   value: posAvg + '%',        sub: 'sentiment' },
+  ];
+
+  document.getElementById('stat-cards').innerHTML = cards.map(c => `
+    <div class="card p-4 fade-in">
+      <p class="text-xs text-slate-400 uppercase tracking-wider mb-1">${c.label}</p>
+      <p class="text-2xl font-bold text-white">${c.value}</p>
+      <p class="text-xs text-slate-500 mt-0.5">${c.sub}</p>
+    </div>`).join('');
+}
+
+// ── Summary ───────────────────────────────────────────────────────────────────
+async function loadSummary(topic) {
+  document.getElementById('summary-box').innerHTML = '<div class="spinner"></div>';
+  const { data } = await gql(`{ dailySummary(topic: "${topic}") {
+    summaryDate summaryText postCount trendingWords
+    sentiment { positive neutral negative }
+  }}`);
+  const s = data?.dailySummary;
+  if (!s) {
+    document.getElementById('summary-box').innerHTML =
+      '<p class="text-slate-500 text-sm">No summary yet for this topic.</p>';
+    return;
+  }
+  const pos = Math.round(s.sentiment.positive * 100);
+  const neu = Math.round(s.sentiment.neutral  * 100);
+  const neg = Math.round(s.sentiment.negative * 100);
+  document.getElementById('summary-box').innerHTML = `
+    <div class="fade-in">
+      <p class="text-slate-200 text-sm leading-relaxed mb-4">${s.summaryText}</p>
+      <div class="flex gap-2 flex-wrap mb-3">
+        <span class="tag tag-pos">▲ ${pos}% positive</span>
+        <span class="tag tag-neu">● ${neu}% neutral</span>
+        <span class="tag tag-neg">▼ ${neg}% negative</span>
+        <span class="text-slate-500 text-xs self-center">${s.postCount} posts</span>
+      </div>
+      <div class="flex flex-wrap gap-1">
+        ${s.trendingWords.map(w => `<span class="pill">${w}</span>`).join('')}
+      </div>
+    </div>`;
+}
+
+// ── Posts ─────────────────────────────────────────────────────────────────────
+async function loadPosts() {
+  const topic     = document.getElementById('filter-topic').value;
+  const sentiment = document.getElementById('filter-sentiment').value;
+  const topicArg  = topic     ? `, topic: "${topic}"`     : '';
+  const sentArg   = sentiment ? `, sentiment: "${sentiment}"` : '';
+
+  const { data } = await gql(`{ posts(limit: 20${topicArg}${sentArg}) {
+    title platform rawScore sentiment topicTags summary url
+  }}`);
+
+  const posts = data?.posts ?? [];
+  if (!posts.length) {
+    document.getElementById('posts-list').innerHTML =
+      '<p class="text-slate-500 text-sm">No posts found.</p>';
+    return;
+  }
+
+  document.getElementById('posts-list').innerHTML = `
+    <div class="divide-y divide-slate-700">
+      ${posts.map(p => {
+        const sClass = p.sentiment === 'positive' ? 'tag-pos' : p.sentiment === 'negative' ? 'tag-neg' : 'tag-neu';
+        const tags   = (p.topicTags||[]).map(t => `<span class="pill">${t}</span>`).join(' ');
+        const title  = p.url
+          ? `<a href="${p.url}" target="_blank" class="hover:text-indigo-300 transition">${p.title || p.summary}</a>`
+          : (p.title || p.summary);
+        return `
+          <div class="py-3 fade-in">
+            <div class="flex items-start justify-between gap-2">
+              <p class="text-sm text-slate-200 font-medium leading-snug">${title}</p>
+              <span class="tag ${sClass} shrink-0">${p.sentiment}</span>
+            </div>
+            <div class="flex items-center gap-2 mt-1.5 flex-wrap">
+              <span class="text-xs text-slate-500">${p.platform}</span>
+              <span class="text-xs text-slate-600">·</span>
+              <span class="text-xs text-slate-500">score ${p.rawScore}</span>
+              <span class="text-xs text-slate-600">·</span>
+              ${tags}
+            </div>
+            ${p.summary && p.summary !== p.title ? `<p class="text-xs text-slate-400 mt-1 line-clamp-2">${p.summary}</p>` : ''}
+          </div>`;
+      }).join('')}
+    </div>`;
+}
+
+// ── Topic dropdowns ───────────────────────────────────────────────────────────
+function populateTopicSelects(stats) {
+  const topics = stats.map(s => s.topic);
+
+  const filterSel  = document.getElementById('filter-topic');
+  const summarySel = document.getElementById('summary-topic-select');
+
+  filterSel.innerHTML  = '<option value="">All topics</option>' +
+    topics.map(t => `<option value="${t}">${t}</option>`).join('');
+  summarySel.innerHTML = topics.map(t => `<option value="${t}">${t}</option>`).join('');
+}
+
+// ── WebSocket live ticker ─────────────────────────────────────────────────────
+function connectLive() {
+  const ws = new WebSocket(`ws://${location.host}/ws/live`);
+  const badge  = document.getElementById('ws-badge');
+  const ticker = document.getElementById('live-ticker');
+
+  ws.onopen  = () => { badge.className='tag tag-pos'; badge.textContent='● live'; };
+  ws.onclose = () => { badge.className='tag tag-neg'; badge.textContent='● offline';
+                       setTimeout(connectLive, 3000); };
+
+  ws.onmessage = ({ data }) => {
+    const p = JSON.parse(data);
+    const sClass = p.sentiment==='positive'?'tag-pos':p.sentiment==='negative'?'tag-neg':'tag-neu';
+    const el = document.createElement('div');
+    el.className = 'flex items-center gap-2 text-xs text-slate-300 fade-in';
+    el.innerHTML = `
+      <span class="tag ${sClass} shrink-0">${p.sentiment||'—'}</span>
+      <span class="pill shrink-0">${p.platform}</span>
+      <span class="truncate">${p.title || p.body?.slice(0,80) || '—'}</span>
+      <span class="text-slate-500 shrink-0">↑${p.raw_score||0}</span>`;
+    if (ticker.firstChild?.tagName === 'P') ticker.innerHTML = '';
+    ticker.prepend(el);
+    if (ticker.children.length > 30) ticker.lastChild.remove();
+  };
+}
+
+// ── Bootstrap ─────────────────────────────────────────────────────────────────
+async function loadAll() {
+  const [statsRes, postsRes] = await Promise.all([
+    gql('{ topicStats { topic postCount positivePct neutralPct negativePct } }'),
+    gql('{ posts(limit:50) { title platform rawScore sentiment topicTags summary url } }'),
+  ]);
+
+  const stats = statsRes.data?.topicStats ?? [];
+  const posts = postsRes.data?.posts ?? [];
+
+  renderStatCards(stats, posts);
+  renderChart(stats);
+  populateTopicSelects(stats);
+
+  if (stats.length) loadSummary(stats[0].topic);
+  loadPosts();
+}
+
+loadAll();
+connectLive();
+</script>
+</body>
+</html>
