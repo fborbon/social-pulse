@@ -12,6 +12,17 @@ from sources.hackernews import fetch_top_posts as hn_posts
 from sources.rss import fetch_all_feeds
 from sources.reddit import fetch_subreddit_posts, TOPIC_SUBREDDITS
 from sources.mastodon import fetch_timeline
+from sources.lobsters import fetch_lobsters
+from sources.devto import fetch_devto
+from sources.lemmy import fetch_lemmy
+from sources.bluesky import fetch_bluesky
+from sources.arxiv import fetch_arxiv
+from sources.gdelt import fetch_gdelt
+from sources.sec_edgar import fetch_sec_edgar
+from sources.federal_register import fetch_federal_register
+from sources.guardian import fetch_guardian
+from sources.newsapi import fetch_newsapi
+from sources.nytimes import fetch_nytimes
 from shared_models import RawPost
 
 logging.basicConfig(level=logging.INFO)
@@ -85,19 +96,36 @@ async def collect_mastodon() -> int:
         return 0
 
 
+async def _collect(name: str, coro) -> int:
+    try:
+        posts = await coro
+        return await _publish_posts(posts, name)
+    except Exception as e:
+        log.warning("%s failed: %s", name, e)
+        return 0
+
+
 async def run_all_collectors() -> dict[str, int]:
-    results = await asyncio.gather(
-        collect_hackernews(),
-        collect_rss(),
-        collect_reddit(),
-        collect_mastodon(),
-        return_exceptions=True,
-    )
-    sources = ["hackernews", "rss", "reddit", "mastodon"]
-    return {
-        src: (r if isinstance(r, int) else 0)
-        for src, r in zip(sources, results)
-    }
+    named = [
+        ("hackernews",       collect_hackernews()),
+        ("rss",              collect_rss()),
+        ("reddit",           collect_reddit()),
+        ("mastodon",         collect_mastodon()),
+        ("lobsters",         _collect("lobsters",         fetch_lobsters())),
+        ("devto",            _collect("devto",            fetch_devto())),
+        ("lemmy",            _collect("lemmy",            fetch_lemmy())),
+        ("bluesky",          _collect("bluesky",          fetch_bluesky())),
+        ("arxiv",            _collect("arxiv",            fetch_arxiv())),
+        ("gdelt",            _collect("gdelt",            fetch_gdelt())),
+        ("sec_edgar",        _collect("sec_edgar",        fetch_sec_edgar())),
+        ("federal_register", _collect("federal_register", fetch_federal_register())),
+        ("guardian",         _collect("guardian",         fetch_guardian(settings.guardian_api_key))),
+        ("newsapi",          _collect("newsapi",          fetch_newsapi(settings.newsapi_key))),
+        ("nytimes",          _collect("nytimes",          fetch_nytimes(settings.nytimes_api_key))),
+    ]
+    sources, coros = zip(*named)
+    results = await asyncio.gather(*coros, return_exceptions=True)
+    return {src: (r if isinstance(r, int) else 0) for src, r in zip(sources, results)}
 
 
 async def periodic_collection():

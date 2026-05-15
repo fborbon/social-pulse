@@ -63,16 +63,55 @@ TOPIC_DESCRIPTIONS = {
 }
 
 
-async def _fetch(session, url):
-    async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-        return await r.json()
+import feedparser
+
+DEFAULT_RSS_FEEDS = [
+    "https://feeds.bbci.co.uk/news/rss.xml",
+    "https://feeds.reuters.com/reuters/topNews",
+    "https://feeds.npr.org/1001/rss.xml",
+    "https://www.theverge.com/rss/index.xml",
+    "https://feeds.arstechnica.com/arstechnica/index",
+    "https://techcrunch.com/feed/",
+    "https://www.nature.com/nature.rss",
+    "https://www.bls.gov/feed/bls_latest.rss",
+]
+
+GUARDIAN_API_KEY = os.getenv("GUARDIAN_API_KEY", "")
+NEWSAPI_KEY      = os.getenv("NEWSAPI_KEY", "")
+NYTIMES_API_KEY  = os.getenv("NYTIMES_API_KEY", "")
 
 
+def _now() -> str:
+    return datetime.now(tz=timezone.utc).isoformat()
+
+
+def _ts(s: str) -> str:
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).isoformat()
+    except Exception:
+        return _now()
+
+
+async def _get_json(session, url, params=None):
+    async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=12)) as r:
+        if r.status != 200:
+            raise ValueError(f"HTTP {r.status}")
+        return await r.json(content_type=None)
+
+
+async def _get_text(session, url):
+    async with session.get(url, timeout=aiohttp.ClientTimeout(total=12)) as r:
+        return await r.text()
+
+
+# ── HackerNews ────────────────────────────────────────────────────────────────
 async def fetch_hn(limit=40):
     async with aiohttp.ClientSession() as s:
-        ids = await _fetch(s, f"{HN_API}/topstories.json")
-        tasks = [_fetch(s, f"{HN_API}/item/{i}.json") for i in ids[:limit]]
-        items = await asyncio.gather(*tasks, return_exceptions=True)
+        ids = await _get_json(s, f"{HN_API}/topstories.json")
+        items = await asyncio.gather(
+            *[_get_json(s, f"{HN_API}/item/{i}.json") for i in ids[:limit]],
+            return_exceptions=True,
+        )
     posts = []
     for item in items:
         if isinstance(item, Exception) or not isinstance(item, dict):
@@ -81,15 +120,385 @@ async def fetch_hn(limit=40):
         if not body:
             continue
         posts.append({
-            "platform":    "hackernews",
-            "external_id": str(item["id"]),
-            "author":      item.get("by"),
-            "title":       item.get("title"),
-            "body":        body,
-            "url":         item.get("url"),
-            "raw_score":   item.get("score", 0),
-            "timestamp":   datetime.fromtimestamp(item.get("time", 0), tz=timezone.utc).isoformat(),
+            "platform": "hackernews", "external_id": str(item["id"]),
+            "author": item.get("by"), "title": item.get("title"), "body": body,
+            "url": item.get("url"), "raw_score": item.get("score", 0),
+            "timestamp": datetime.fromtimestamp(item.get("time", 0), tz=timezone.utc).isoformat(),
         })
+    return posts
+
+
+# ── Lobste.rs ─────────────────────────────────────────────────────────────────
+async def fetch_lobsters(limit=25):
+    try:
+        async with aiohttp.ClientSession() as s:
+            items = await _get_json(s, "https://lobste.rs/hottest.json")
+        return [
+            {"platform": "lobsters", "external_id": i["short_id"],
+             "author": i.get("submitter_user", {}).get("username"),
+             "title": i.get("title"), "body": i.get("description") or i.get("title", ""),
+             "url": i.get("url") or f"https://lobste.rs/s/{i['short_id']}",
+             "raw_score": i.get("score", 0), "timestamp": _ts(i.get("created_at", ""))}
+            for i in items[:limit] if i.get("title")
+        ]
+    except Exception:
+        return []
+
+
+# ── Dev.to ────────────────────────────────────────────────────────────────────
+async def fetch_devto(limit=25):
+    try:
+        async with aiohttp.ClientSession() as s:
+            items = await _get_json(s, f"https://dev.to/api/articles?per_page={limit}&top=1")
+        return [
+            {"platform": "devto", "external_id": str(i["id"]),
+             "author": i.get("user", {}).get("username"),
+             "title": i.get("title"), "body": i.get("description") or i.get("title", ""),
+             "url": i.get("url"),
+             "raw_score": i.get("positive_reactions_count", 0) + i.get("comments_count", 0),
+             "timestamp": _ts(i.get("published_at", ""))}
+            for i in items if i.get("title")
+        ]
+    except Exception:
+        return []
+
+
+# ── Lemmy ─────────────────────────────────────────────────────────────────────
+async def fetch_lemmy(limit=25):
+    try:
+        async with aiohttp.ClientSession() as s:
+            data = await _get_json(
+                s, f"https://lemmy.world/api/v3/post/list?type_=All&sort=Hot&limit={limit}"
+            )
+        posts = []
+        for item in data.get("posts", []):
+            p = item.get("post", {})
+            body = p.get("body") or p.get("name") or ""
+            if not body:
+                continue
+            posts.append({
+                "platform": "lemmy", "external_id": str(p["id"]),
+                "author": item.get("creator", {}).get("name"),
+                "title": p.get("name"), "body": body,
+                "url": p.get("url") or f"https://lemmy.world/post/{p['id']}",
+                "raw_score": item.get("counts", {}).get("score", 0),
+                "timestamp": _ts(p.get("published", "")),
+            })
+        return posts
+    except Exception:
+        return []
+
+
+# ── Bluesky (public search) ───────────────────────────────────────────────────
+async def fetch_bluesky(limit_per_query=8):
+    posts, seen = [], set()
+    queries = ["news politics", "economy inflation", "technology AI",
+               "health science", "climate environment", "entertainment sports"]
+    try:
+        async with aiohttp.ClientSession() as s:
+            for q in queries:
+                try:
+                    data = await _get_json(
+                        s, "https://public.api.bsky.app/xrpc/app.bsky.feed.searchPosts",
+                        params={"q": q, "limit": limit_per_query},
+                    )
+                    for item in data.get("posts", []):
+                        uri = item.get("uri", "")
+                        if uri in seen:
+                            continue
+                        seen.add(uri)
+                        record = item.get("record", {})
+                        body = re.sub(r"<[^>]+>", " ", record.get("text", "")).strip()
+                        if not body:
+                            continue
+                        handle = item.get("author", {}).get("handle", "")
+                        posts.append({
+                            "platform": "bluesky",
+                            "external_id": uri.split("/")[-1],
+                            "author": handle, "body": body,
+                            "url": f"https://bsky.app/profile/{handle}/post/{uri.split('/')[-1]}",
+                            "raw_score": item.get("likeCount", 0) + item.get("repostCount", 0),
+                            "timestamp": _ts(record.get("createdAt", "")),
+                        })
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return posts
+
+
+# ── arXiv ─────────────────────────────────────────────────────────────────────
+async def fetch_arxiv(limit_per_term=4):
+    posts, seen = [], set()
+    terms = ["artificial intelligence", "climate change", "economics",
+             "machine learning", "public health", "quantum computing"]
+    try:
+        async with aiohttp.ClientSession() as s:
+            for term in terms:
+                try:
+                    url = (
+                        "https://export.arxiv.org/api/query"
+                        f"?search_query=all:{term.replace(' ', '+')}"
+                        f"&max_results={limit_per_term}&sortBy=submittedDate&sortOrder=descending"
+                    )
+                    content = await _get_text(s, url)
+                    feed = feedparser.parse(content)
+                    for entry in feed.entries:
+                        eid = entry.get("id", "")
+                        if eid in seen:
+                            continue
+                        seen.add(eid)
+                        body = (entry.get("summary") or entry.get("title", ""))[:400]
+                        try:
+                            ts = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc).isoformat()
+                        except Exception:
+                            ts = _now()
+                        posts.append({
+                            "platform": "arxiv",
+                            "external_id": eid.split("/abs/")[-1].replace("/", "_"),
+                            "author": ", ".join(a.get("name","") for a in entry.get("authors",[])[:3]),
+                            "title": entry.get("title","").replace("\n"," "),
+                            "body": body, "url": eid,
+                            "raw_score": 0, "timestamp": ts,
+                        })
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return posts
+
+
+# ── GDELT ─────────────────────────────────────────────────────────────────────
+async def fetch_gdelt(limit_per_query=4):
+    posts, seen = [], set()
+    queries = ["politics government", "economy inflation", "technology",
+               "health pandemic", "climate environment", "crime police"]
+    try:
+        async with aiohttp.ClientSession() as s:
+            for query in queries:
+                try:
+                    data = await _get_json(s, "https://api.gdeltproject.org/api/v2/doc/doc", params={
+                        "query": f"{query} sourcelang:english",
+                        "mode": "artlist", "maxrecords": limit_per_query, "format": "json",
+                    })
+                    for art in data.get("articles", []):
+                        url = art.get("url", "")
+                        if url in seen or not art.get("title"):
+                            continue
+                        seen.add(url)
+                        try:
+                            ts = datetime.strptime(art.get("seendate",""), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc).isoformat()
+                        except Exception:
+                            ts = _now()
+                        posts.append({
+                            "platform": "gdelt", "external_id": url[-80:],
+                            "title": art["title"], "body": art["title"],
+                            "url": url, "raw_score": 0, "timestamp": ts,
+                        })
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return posts
+
+
+# ── SEC EDGAR ─────────────────────────────────────────────────────────────────
+async def fetch_sec_edgar(limit_per_query=4):
+    from datetime import timedelta
+    posts, seen = [], set()
+    since = (datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%d")
+    queries = ["earnings revenue", "merger acquisition", "layoffs workforce"]
+    try:
+        async with aiohttp.ClientSession() as s:
+            for query in queries:
+                try:
+                    data = await _get_json(s, "https://efts.sec.gov/LATEST/search-index", params={
+                        "q": query, "forms": "8-K", "dateRange": "custom", "startdt": since,
+                    })
+                    for hit in data.get("hits", {}).get("hits", [])[:limit_per_query]:
+                        src = hit.get("_source", {})
+                        eid = hit.get("_id", "")
+                        if eid in seen:
+                            continue
+                        seen.add(eid)
+                        entity = src.get("entity_name", "Unknown")
+                        form   = src.get("form_type", "8-K")
+                        try:
+                            ts = datetime.strptime(src["file_date"], "%Y-%m-%d").replace(tzinfo=timezone.utc).isoformat()
+                        except Exception:
+                            ts = _now()
+                        posts.append({
+                            "platform": "sec_edgar", "external_id": eid,
+                            "title": f"{entity} filed {form}",
+                            "body": f"{entity} — {form}. Period: {src.get('period_of_report','N/A')}.",
+                            "url": src.get("file_url_htm") or f"https://www.sec.gov/cgi-bin/browse-edgar?company={entity}",
+                            "raw_score": 0, "timestamp": ts,
+                        })
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return posts
+
+
+# ── Federal Register ──────────────────────────────────────────────────────────
+async def fetch_federal_register(limit_per_term=4):
+    posts, seen = [], set()
+    terms = ["technology", "health", "environment", "economy", "public safety"]
+    try:
+        async with aiohttp.ClientSession() as s:
+            for term in terms:
+                try:
+                    data = await _get_json(s, "https://www.federalregister.gov/api/v1/articles.json", params={
+                        "per_page": limit_per_term, "order": "newest",
+                        "fields[]": ["abstract","title","agency_names","publication_date","html_url","document_number"],
+                        "conditions[term]": term,
+                    })
+                    for art in data.get("results", []):
+                        doc_num = art.get("document_number", "")
+                        if doc_num in seen:
+                            continue
+                        seen.add(doc_num)
+                        body = art.get("abstract") or art.get("title") or ""
+                        if not body:
+                            continue
+                        try:
+                            ts = datetime.strptime(art["publication_date"], "%Y-%m-%d").replace(tzinfo=timezone.utc).isoformat()
+                        except Exception:
+                            ts = _now()
+                        posts.append({
+                            "platform": "federal_register", "external_id": doc_num,
+                            "author": ", ".join(art.get("agency_names", [])[:2]) or None,
+                            "title": art.get("title"), "body": body[:400],
+                            "url": art.get("html_url"), "raw_score": 0, "timestamp": ts,
+                        })
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return posts
+
+
+# ── RSS feeds ─────────────────────────────────────────────────────────────────
+async def fetch_rss(feed_urls=None):
+    urls = feed_urls or DEFAULT_RSS_FEEDS
+    posts = []
+    for url in urls:
+        try:
+            feed = feedparser.parse(url)
+            for entry in feed.entries:
+                body = entry.get("summary") or entry.get("description") or entry.get("title") or ""
+                if not body:
+                    continue
+                try:
+                    ts = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc).isoformat()
+                except Exception:
+                    ts = _now()
+                posts.append({
+                    "platform": "rss", "external_id": entry.get("id") or entry.get("link") or body[:64],
+                    "author": entry.get("author"), "title": entry.get("title"),
+                    "body": body, "url": entry.get("link"),
+                    "raw_score": 0, "timestamp": ts,
+                })
+        except Exception:
+            continue
+    return posts
+
+
+# ── The Guardian ──────────────────────────────────────────────────────────────
+async def fetch_guardian(api_key: str, limit_per_section=4):
+    if not api_key:
+        return []
+    posts, seen = [], set()
+    sections = ["politics", "world", "business", "technology", "science",
+                "environment", "sport", "culture", "society", "film", "music"]
+    try:
+        async with aiohttp.ClientSession() as s:
+            for section in sections:
+                try:
+                    data = await _get_json(s, "https://content.guardianapis.com/search", params={
+                        "api-key": api_key, "section": section,
+                        "page-size": limit_per_section,
+                        "show-fields": "headline,trailText",
+                        "order-by": "newest",
+                    })
+                    for art in data.get("response", {}).get("results", []):
+                        uid = art.get("id", "")
+                        if uid in seen:
+                            continue
+                        seen.add(uid)
+                        fields = art.get("fields", {})
+                        body = fields.get("trailText") or art.get("webTitle", "")
+                        posts.append({
+                            "platform": "guardian", "external_id": uid,
+                            "title": art.get("webTitle"), "body": body,
+                            "url": art.get("webUrl"), "raw_score": 0,
+                            "timestamp": _ts(art.get("webPublicationDate", "")),
+                        })
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return posts
+
+
+# ── NewsAPI ───────────────────────────────────────────────────────────────────
+async def fetch_newsapi(api_key: str, limit=40):
+    if not api_key:
+        return []
+    try:
+        async with aiohttp.ClientSession() as s:
+            data = await _get_json(s, "https://newsapi.org/v2/top-headlines", params={
+                "apiKey": api_key, "language": "en", "pageSize": limit,
+            })
+        return [
+            {"platform": "newsapi",
+             "external_id": art.get("url","")[-80:],
+             "author": art.get("author") or art.get("source",{}).get("name"),
+             "title": art.get("title"), "body": art.get("description") or art.get("title",""),
+             "url": art.get("url"), "raw_score": 0,
+             "timestamp": _ts(art.get("publishedAt",""))}
+            for art in data.get("articles", [])
+            if art.get("url") and art.get("url") != "https://removed.com"
+        ]
+    except Exception:
+        return []
+
+
+# ── NY Times ──────────────────────────────────────────────────────────────────
+async def fetch_nytimes(api_key: str, limit_per_section=4):
+    if not api_key:
+        return []
+    posts, seen = [], set()
+    sections = ["home", "world", "politics", "technology", "science",
+                "health", "business", "sports", "arts", "climate"]
+    try:
+        async with aiohttp.ClientSession() as s:
+            for section in sections:
+                try:
+                    data = await _get_json(
+                        s, f"https://api.nytimes.com/svc/topstories/v2/{section}.json",
+                        params={"api-key": api_key},
+                    )
+                    for art in data.get("results", [])[:limit_per_section]:
+                        url = art.get("url", "")
+                        if url in seen:
+                            continue
+                        seen.add(url)
+                        body = art.get("abstract") or art.get("title") or ""
+                        if not body:
+                            continue
+                        posts.append({
+                            "platform": "nytimes",
+                            "external_id": url.split("/")[-1][:80],
+                            "author": art.get("byline","").replace("By ","") or None,
+                            "title": art.get("title"), "body": body, "url": url,
+                            "raw_score": 0, "timestamp": _ts(art.get("published_date","")),
+                        })
+                except Exception:
+                    continue
+    except Exception:
+        pass
     return posts
 
 
@@ -463,11 +872,45 @@ class Query:
 # ── 10. Bootstrap ─────────────────────────────────────────────────────────────
 
 async def load_data():
-    print("Fetching HackerNews top stories...", flush=True)
-    raw      = await fetch_hn(limit=40)
-    print(f"  Fetched {len(raw)} posts", flush=True)
+    print("Fetching from all sources in parallel...", flush=True)
+    results = await asyncio.gather(
+        fetch_hn(limit=40),
+        fetch_lobsters(limit=25),
+        fetch_devto(limit=25),
+        fetch_lemmy(limit=25),
+        fetch_bluesky(limit_per_query=8),
+        fetch_arxiv(limit_per_term=4),
+        fetch_gdelt(limit_per_query=4),
+        fetch_sec_edgar(limit_per_query=4),
+        fetch_federal_register(limit_per_term=4),
+        fetch_rss(),
+        fetch_guardian(GUARDIAN_API_KEY, limit_per_section=4),
+        fetch_newsapi(NEWSAPI_KEY, limit=40),
+        fetch_nytimes(NYTIMES_API_KEY, limit_per_section=4),
+        return_exceptions=True,
+    )
+    source_names = [
+        "hackernews","lobsters","devto","lemmy","bluesky","arxiv",
+        "gdelt","sec_edgar","federal_register","rss","guardian","newsapi","nytimes",
+    ]
+    raw = []
+    for name, result in zip(source_names, results):
+        if isinstance(result, list):
+            print(f"  {name:20s} {len(result):4d} posts", flush=True)
+            raw.extend(result)
+        else:
+            print(f"  {name:20s} FAILED ({result})", flush=True)
 
-    filtered = semantic_filter(raw)
+    # deduplicate by (platform, external_id)
+    seen, deduped_raw = set(), []
+    for p in raw:
+        key = (p.get("platform"), p.get("external_id"))
+        if key not in seen:
+            seen.add(key)
+            deduped_raw.append(p)
+    print(f"  Total unique raw posts: {len(deduped_raw)}", flush=True)
+
+    filtered = semantic_filter(deduped_raw)
     print(f"  Semantic filter: {len(filtered)} on-topic posts", flush=True)
 
     ranked   = time_decay_rank(filtered)

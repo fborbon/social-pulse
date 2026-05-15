@@ -12,8 +12,20 @@ class Settings(BaseSettings):
     mastodon_base_url: str = "https://mastodon.social"
     mastodon_access_token: str = ""
 
+    # API-key sources
+    guardian_api_key: str = ""
+    newsapi_key: str = ""
+    nytimes_api_key: str = ""
+
     track_topics: str = "artificial intelligence,climate change,cryptocurrency,elections"
-    rss_feeds: str = ""
+    rss_feeds: str = (
+        "https://feeds.bbci.co.uk/news/rss.xml,"
+        "https://feeds.reuters.com/reuters/topNews,"
+        "https://feeds.npr.org/1001/rss.xml,"
+        "https://www.theverge.com/rss/index.xml,"
+        "https://feeds.arstechnica.com/arstechnica/index,"
+        "https://www.bls.gov/feed/bls_latest.rss"
+    )
 
     @property
     def topics(self) -> list[str]:
