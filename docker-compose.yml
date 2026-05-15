@@ -80,6 +80,16 @@ services:
     volumes:
       - ./workers/enrichment_worker:/app
 
+  ranking-worker:
+    build: ./workers/ranking_worker
+    depends_on: [kafka]
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      DEDUP_THRESHOLD: "0.55"
+    volumes:
+      - ./workers/ranking_worker:/app
+
   summary-worker:
     build: ./workers/summary_worker
     depends_on: [kafka, postgres]
