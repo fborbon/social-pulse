@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     guardian_api_key: str = ""
     newsapi_key: str = ""
     nytimes_api_key: str = ""
+    bluesky_handle: str = ""
+    bluesky_app_password: str = ""
 
     track_topics: str = "artificial intelligence,climate change,cryptocurrency,elections"
     rss_feeds: str = (

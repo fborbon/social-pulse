@@ -114,7 +114,7 @@ async def run_all_collectors() -> dict[str, int]:
         ("lobsters",         _collect("lobsters",         fetch_lobsters())),
         ("devto",            _collect("devto",            fetch_devto())),
         ("lemmy",            _collect("lemmy",            fetch_lemmy())),
-        ("bluesky",          _collect("bluesky",          fetch_bluesky())),
+        ("bluesky",          _collect("bluesky",          fetch_bluesky(settings.bluesky_handle, settings.bluesky_app_password))),
         ("arxiv",            _collect("arxiv",            fetch_arxiv())),
         ("gdelt",            _collect("gdelt",            fetch_gdelt())),
         ("sec_edgar",        _collect("sec_edgar",        fetch_sec_edgar())),

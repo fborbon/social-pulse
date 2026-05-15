@@ -76,9 +76,11 @@ DEFAULT_RSS_FEEDS = [
     "https://www.bls.gov/feed/bls_latest.rss",
 ]
 
-GUARDIAN_API_KEY = os.getenv("GUARDIAN_API_KEY", "")
-NEWSAPI_KEY      = os.getenv("NEWSAPI_KEY", "")
-NYTIMES_API_KEY  = os.getenv("NYTIMES_API_KEY", "")
+GUARDIAN_API_KEY    = os.getenv("GUARDIAN_API_KEY", "")
+NEWSAPI_KEY         = os.getenv("NEWSAPI_KEY", "")
+NYTIMES_API_KEY     = os.getenv("NYTIMES_API_KEY", "")
+BLUESKY_HANDLE      = os.getenv("BLUESKY_HANDLE", "")
+BLUESKY_APP_PASSWORD = os.getenv("BLUESKY_APP_PASSWORD", "")
 
 
 def _now() -> str:
@@ -189,41 +191,51 @@ async def fetch_lemmy(limit=25):
         return []
 
 
-# ── Bluesky (public search) ───────────────────────────────────────────────────
-async def fetch_bluesky(limit_per_query=8):
-    posts, seen = [], set()
-    queries = ["news politics", "economy inflation", "technology AI",
-               "health science", "climate environment", "entertainment sports"]
+# ── Bluesky (atproto SDK — requires BLUESKY_HANDLE + BLUESKY_APP_PASSWORD) ────
+async def fetch_bluesky(handle: str = "", password: str = "", limit_per_query: int = 10):
+    if not handle or not password:
+        return []
+    from atproto import AsyncClient
+    client = AsyncClient()
     try:
-        async with aiohttp.ClientSession() as s:
-            for q in queries:
-                try:
-                    data = await _get_json(
-                        s, "https://public.api.bsky.app/xrpc/app.bsky.feed.searchPosts",
-                        params={"q": q, "limit": limit_per_query},
-                    )
-                    for item in data.get("posts", []):
-                        uri = item.get("uri", "")
-                        if uri in seen:
-                            continue
-                        seen.add(uri)
-                        record = item.get("record", {})
-                        body = re.sub(r"<[^>]+>", " ", record.get("text", "")).strip()
-                        if not body:
-                            continue
-                        handle = item.get("author", {}).get("handle", "")
-                        posts.append({
-                            "platform": "bluesky",
-                            "external_id": uri.split("/")[-1],
-                            "author": handle, "body": body,
-                            "url": f"https://bsky.app/profile/{handle}/post/{uri.split('/')[-1]}",
-                            "raw_score": item.get("likeCount", 0) + item.get("repostCount", 0),
-                            "timestamp": _ts(record.get("createdAt", "")),
-                        })
-                except Exception:
+        await client.login(handle, password)
+    except Exception as e:
+        print(f"  Bluesky login failed: {e}", flush=True)
+        return []
+    queries = [
+        "politics news", "economy inflation", "technology AI",
+        "health science", "climate environment", "entertainment sports",
+        "crime safety", "world news", "wall street markets",
+    ]
+    posts, seen = [], set()
+    for query in queries:
+        try:
+            result = await client.app.bsky.feed.search_posts(
+                params={"q": query, "limit": limit_per_query}
+            )
+            for item in result.posts:
+                uri = item.uri
+                if uri in seen:
                     continue
-    except Exception:
-        pass
+                seen.add(uri)
+                body = re.sub(r"<[^>]+>", " ", item.record.text or "").strip()
+                if not body:
+                    continue
+                h = item.author.handle or ""
+                try:
+                    ts = datetime.fromisoformat(item.record.created_at.replace("Z", "+00:00")).isoformat()
+                except Exception:
+                    ts = _now()
+                posts.append({
+                    "platform": "bluesky",
+                    "external_id": uri.split("/")[-1],
+                    "author": h, "body": body,
+                    "url": f"https://bsky.app/profile/{h}/post/{uri.split('/')[-1]}",
+                    "raw_score": (getattr(item, "like_count", 0) or 0) + (getattr(item, "repost_count", 0) or 0),
+                    "timestamp": ts,
+                })
+        except Exception:
+            continue
     return posts
 
 
@@ -233,8 +245,11 @@ async def fetch_arxiv(limit_per_term=4):
     terms = ["artificial intelligence", "climate change", "economics",
              "machine learning", "public health", "quantum computing"]
     try:
+        # arXiv rate-limits rapid requests — run sequentially with delay
         async with aiohttp.ClientSession() as s:
-            for term in terms:
+            for i, term in enumerate(terms):
+                if i > 0:
+                    await asyncio.sleep(3)
                 try:
                     url = (
                         "https://export.arxiv.org/api/query"
@@ -882,7 +897,7 @@ async def load_data():
         fetch_lobsters(limit=25),
         fetch_devto(limit=25),
         fetch_lemmy(limit=25),
-        fetch_bluesky(limit_per_query=8),
+        fetch_bluesky(BLUESKY_HANDLE, BLUESKY_APP_PASSWORD, limit_per_query=10),
         fetch_arxiv(limit_per_term=4),
         fetch_gdelt(limit_per_query=4),
         fetch_sec_edgar(limit_per_query=4),

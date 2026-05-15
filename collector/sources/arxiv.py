@@ -1,4 +1,5 @@
 import sys, os; sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import asyncio
 from datetime import datetime, timezone
 import aiohttp
 import feedparser
@@ -14,8 +15,11 @@ async def fetch_arxiv(limit_per_term: int = 5) -> list[RawPost]:
     posts: list[RawPost] = []
     seen: set[str] = set()
 
+    # arXiv rate-limits rapid sequential requests — add a short delay
     async with aiohttp.ClientSession() as s:
-        for term in SEARCH_TERMS:
+        for i, term in enumerate(SEARCH_TERMS):
+            if i > 0:
+                await asyncio.sleep(3)
             url = (
                 "https://export.arxiv.org/api/query"
                 f"?search_query=all:{term.replace(' ', '+')}"
