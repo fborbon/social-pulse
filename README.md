@@ -13,6 +13,7 @@ An educational, production-inspired platform that monitors social media and news
 - [Libraries](#libraries)
 - [AI & Machine Learning](#ai--machine-learning)
 - [Database Schema](#database-schema)
+- [Demo vs Full Stack](#demo-vs-full-stack)
 - [Getting Started](#getting-started)
 
 ---
@@ -431,7 +432,132 @@ daily_summaries    -- one row per (date, topic), contains Claude-generated text
 
 ---
 
-## Getting Started
+## Demo vs Full Stack
+
+### Why this project is deployed as a demo
+
+This project is intentionally deployed as a **single-process demo** (`demo.py`) rather than the full multi-service Docker stack. The decision is grounded in infrastructure cost, resource consumption, and fitness for purpose — all of which are explained below as part of the educational goals of the project.
+
+---
+
+### What the demo does vs what the full stack adds
+
+The demo collapses all pipeline stages into a single Python process with SQLite for persistence. The full stack separates each stage into an independent service connected by Kafka.
+
+```
+Demo (demo.py — one process)                Full stack (docker compose — 10 services)
+─────────────────────────────────────────   ─────────────────────────────────────────
+fetch → filter → enrich → summarize         Collector → Kafka → Filter Worker
+        (all function calls)                         → Enrichment Worker → PostgreSQL
+SQLite for persistence                               → Ranking Worker
+APScheduler for daily job at 07:15 UTC               → Summary Worker → PostgreSQL
+                                            API service reads from PostgreSQL
+                                            WebSocket reads live from Kafka
+```
+
+| Capability | Demo | Full stack |
+|---|---|---|
+| Collect from 13 sources | ✅ | ✅ |
+| Semantic filtering (TF-IDF) | ✅ | ✅ |
+| Time-decay ranking | ✅ | ✅ |
+| Sentiment + entity enrichment | ✅ | ✅ |
+| Deduplication + cross-platform clustering | ✅ | ✅ |
+| AI daily summaries (Claude Haiku) | ✅ | ✅ |
+| GraphQL API + dashboard | ✅ | ✅ |
+| RAG search | ✅ | ✅ |
+| Entity co-occurrence graph | ✅ | ✅ |
+| Historical trend charts | ✅ | ✅ |
+| Spike detection | ✅ | ✅ |
+| Scheduled daily collection (07:15 UTC) | ✅ APScheduler | ✅ APScheduler |
+| Data persistence across restarts | ✅ SQLite | ✅ PostgreSQL |
+| Real-time WebSocket live stream | ⚠️ endpoint exists, idle | ✅ fed by live Kafka stream |
+| Horizontal scaling (multiple workers) | ❌ single process | ✅ via Kafka partitions |
+| Service isolation (crash one, rest run) | ❌ all-or-nothing | ✅ independent processes |
+| Kafka event replay on worker failure | ❌ | ✅ offset-based resume |
+| Redis response caching | ❌ | ✅ |
+| Kafka UI (event stream visibility) | ❌ | ✅ port 8080 |
+
+---
+
+### Resource consumption: demo vs full stack
+
+The most critical difference for deployment is **RAM**. The full stack requires running Kafka + ZooKeeper — two JVM processes that together consume over 750 MB just at idle, before any application code runs.
+
+**Demo (`demo.py`):**
+
+| Component | RAM |
+|---|---|
+| Python process (FastAPI + sklearn + aiohttp) | ~350 MB |
+| SQLite | ~5 MB |
+| **Total** | **~355 MB** |
+
+**Full stack (Docker Compose, 10 services):**
+
+| Service | RAM |
+|---|---|
+| ZooKeeper | 256 MB |
+| Kafka broker | 512 MB |
+| PostgreSQL | 256 MB |
+| Redis | 64 MB |
+| Collector (FastAPI) | 128 MB |
+| Filter worker (sklearn TF-IDF) | 256 MB |
+| Enrichment worker | 128 MB |
+| Ranking worker (sklearn) | 256 MB |
+| Summary worker | 128 MB |
+| API service (FastAPI + Strawberry) | 128 MB |
+| Kafka UI | 256 MB |
+| **Total** | **~2.8 GB** |
+
+The full stack requires **8× more RAM** than the demo. This is almost entirely due to Kafka and ZooKeeper being JVM-based and reserving heap at startup regardless of message volume.
+
+---
+
+### Cost analysis (AWS EC2, eu-west-1 — Ireland)
+
+This project is hosted on an existing AWS EC2 instance at `54.78.82.101` (eu-west-1). The table below shows what instance type each deployment mode requires and what it costs.
+
+| EC2 type | RAM | vCPU | Demo fits? | Full stack fits? | On-demand price | Monthly cost |
+|---|---|---|---|---|---|---|
+| t3.micro | 1 GB | 2 | ✅ | ❌ | $0.0114/hr | ~$8 |
+| t3.small | 2 GB | 2 | ✅ | ❌ | $0.0228/hr | ~$17 |
+| **t3.medium** | **4 GB** | **2** | **✅** | **✅ (tight)** | **$0.0464/hr** | **~$34** |
+| t3.large | 8 GB | 2 | ✅ | ✅ (comfortable) | $0.0928/hr | ~$68 |
+| t3.xlarge | 16 GB | 4 | ✅ | ✅ (production) | $0.1856/hr | ~$136 |
+
+**Key finding:** switching from the demo to the full stack forces a minimum instance upgrade from t3.micro/small (where the existing site runs) to t3.medium — adding **$17–26/month** in EC2 cost alone, before accounting for additional EBS storage (Kafka needs 20 GB of log space on top of the OS disk).
+
+---
+
+### Fitness for purpose analysis
+
+The three capabilities the full stack provides that the demo does not — horizontal scaling, service isolation, and live Kafka streaming — are each evaluated against the actual usage pattern of this deployment:
+
+**Horizontal scaling**
+> Kafka allows multiple enrichment workers to process posts in parallel by distributing topic partitions across consumers. This matters at high throughput — thousands of posts per minute.
+>
+> *This deployment collects once per day and processes ~300 posts. A single process completes the full pipeline in under 60 seconds. Horizontal scaling provides zero practical benefit here.*
+
+**Service isolation**
+> In the full stack, a crashing enrichment worker does not affect the API or the collector. Each process is independent.
+>
+> *With one scheduled collection per day and no SLA, a process crash means the next day's data is collected 24 hours later. The demo restarts via `systemd` in under 5 seconds. Isolation is not worth the infrastructure cost at this scale.*
+
+**Real-time WebSocket live stream**
+> In the full stack, every post flowing through `posts.enriched` is immediately pushed to connected browser clients, creating a genuine live ticker.
+>
+> *In the demo the WebSocket endpoint exists but only receives posts during the 60-second collection window. Outside of that window it is idle. Given daily collection, a "live" ticker would update for 60 seconds per day. The educational value of the feature is demonstrated through the code; the operational value at daily cadence is negligible.*
+
+---
+
+### Conclusion
+
+The demo version delivers **100% of the analytical features** (collection, filtering, enrichment, summaries, RAG, entity graph, historical charts, spike detection) at **~355 MB RAM** and **$0 additional infrastructure cost**, running on the existing server.
+
+The full stack is provided in `docker-compose.yml`, `deploy/docker-compose.prod.yml`, and `k8s/` as a **complete educational reference** showing how each component would be deployed in a production environment with real traffic, multiple teams, and SLA requirements. The Kubernetes manifests in particular demonstrate concepts — StatefulSets, HPA, KEDA Kafka-lag scaling, Ingress TLS — that are standard in enterprise data platform engineering.
+
+The architectural decision principle illustrated here: **match infrastructure complexity to actual scale requirements**. Kafka and container orchestration are powerful tools that solve real problems at scale. Deploying them for a single daily batch job with one user is over-engineering — and understanding *why* is as valuable as knowing *how* to use them.
+
+---
 
 ### Quick demo (no Docker, no API keys required)
 
