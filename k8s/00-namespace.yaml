@@ -1,0 +1,11 @@
+# EDUCATIONAL NOTE ─────────────────────────────────────────────────────────────
+# A Namespace isolates resources inside a cluster. Every object in this project
+# belongs to "social-pulse", preventing name collisions with other apps running
+# in the same cluster. Think of it as a virtual cluster inside the real one.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: social-pulse
+  labels:
+    app.kubernetes.io/part-of: social-pulse

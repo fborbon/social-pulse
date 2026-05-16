@@ -1,6 +1,12 @@
 """
 Standalone demo — no Kafka or Postgres required.
 Pipeline: fetch → semantic_filter → time_decay_rank → enrich → deduplicate → summarize
+
+Extended with:
+  - SQLite persistence (demo_db.py) — historical data, spike detection
+  - APScheduler — daily collection at 7:15 UTC
+  - RAG search + entity co-occurrence graph (demo_rag.py)
+  - BASE_URL support for /social-pulse/ subpath deployment
 """
 import os
 from pathlib import Path
@@ -8,6 +14,8 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / ".env")
 
 import asyncio
+import json
+import logging
 import re
 from collections import Counter, defaultdict
 from contextlib import asynccontextmanager
@@ -19,13 +27,23 @@ import aiohttp
 import numpy as np
 import uvicorn
 import strawberry
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from fastapi import FastAPI, Query as FQuery
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from strawberry.fastapi import GraphQLRouter
 from pydantic import BaseModel
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+
+import demo_db
+import demo_rag
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("demo")
+
+BASE_URL = os.getenv("BASE_URL", "")   # "" locally, "/social-pulse" in prod
 
 
 # ── 1. Fetch ──────────────────────────────────────────────────────────────────
@@ -696,21 +714,34 @@ def _ai_summary(topic: str, posts: list[dict], pos_pct: int, neu_pct: int, neg_p
         f"(score: {p.get('raw_score',0)}, sentiment: {p.get('sentiment','neutral')})"
         for p in sorted(posts, key=lambda x: x.get("ranked_score", 0), reverse=True)[:20]
     )
-    resp = _ai_client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=300,
-        system=(
-            "You are a social media analyst writing concise daily briefings. "
-            "Be factual, neutral, and highlight the most significant stories. "
-            "Write 2-3 sentences maximum."
-        ),
-        messages=[{"role": "user", "content": (
-            f"Write a daily briefing for the topic '{topic}' based on these "
-            f"{len(posts)} posts from today "
-            f"({pos_pct}% positive, {neu_pct}% neutral, {neg_pct}% negative):\n\n{titles}"
-        )}],
-    )
-    return resp.content[0].text
+    try:
+        resp = _ai_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            system=(
+                "You are a social media analyst writing concise daily briefings. "
+                "Be factual, neutral, and highlight the most significant stories. "
+                "Write 2-3 sentences maximum."
+            ),
+            messages=[{"role": "user", "content": (
+                f"Write a daily briefing for the topic '{topic}' based on these "
+                f"{len(posts)} posts from today "
+                f"({pos_pct}% positive, {neu_pct}% neutral, {neg_pct}% negative):\n\n{titles}"
+            )}],
+        )
+        return resp.content[0].text
+    except Exception as e:
+        log.warning("AI summary failed (%s), using template fallback", e)
+        trending = [w for w, _ in Counter(
+            w for p in posts
+            for w in re.findall(r"\b[a-zA-Z]{4,}\b", (p.get("title","") + " " + p.get("body","")).lower())
+            if w not in STOP_WORDS
+        ).most_common(5)]
+        return (
+            f"Topic '{topic}': {len(posts)} posts today. "
+            f"Sentiment: {pos_pct}% positive, {neu_pct}% neutral, {neg_pct}% negative. "
+            f"Trending: {', '.join(trending)}."
+        )
 
 
 def build_summaries(posts: list[dict]) -> dict:
@@ -898,10 +929,10 @@ class Query:
         )
 
 
-# ── 10. Bootstrap ─────────────────────────────────────────────────────────────
+# ── 10. Collection pipeline ───────────────────────────────────────────────────
 
-async def load_data():
-    print("Fetching from all sources in parallel...", flush=True)
+async def _fetch_all_sources() -> list[dict]:
+    """Fetch from all sources in parallel, return deduplicated raw posts."""
     results = await asyncio.gather(
         fetch_hn(limit=40),
         fetch_lobsters(limit=25),
@@ -922,7 +953,7 @@ async def load_data():
         "hackernews","lobsters","devto","lemmy","bluesky","arxiv",
         "gdelt","sec_edgar","federal_register","rss","guardian","newsapi","nytimes",
     ]
-    raw = []
+    raw: list[dict] = []
     for name, result in zip(source_names, results):
         if isinstance(result, list):
             print(f"  {name:20s} {len(result):4d} posts", flush=True)
@@ -930,58 +961,102 @@ async def load_data():
         else:
             print(f"  {name:20s} FAILED ({result})", flush=True)
 
-    # deduplicate by (platform, external_id)
-    seen, deduped_raw = set(), []
+    seen, unique = set(), []
     for p in raw:
         key = (p.get("platform"), p.get("external_id"))
         if key not in seen:
             seen.add(key)
-            deduped_raw.append(p)
-    print(f"  Total unique raw posts: {len(deduped_raw)}", flush=True)
+            unique.append(p)
+    print(f"  Total unique: {len(unique)}", flush=True)
+    return unique
 
-    filtered = semantic_filter(deduped_raw)
-    print(f"  Semantic filter: {len(filtered)} on-topic posts", flush=True)
+
+async def run_collection() -> None:
+    """Full pipeline — called at startup and by the daily scheduler."""
+    global DB_POSTS, DB_SUMMARIES
+    print(f"\n{'─'*50}", flush=True)
+    print(f"Collection run at {datetime.now(timezone.utc).isoformat()}", flush=True)
+
+    # Try loading today's data from DB first (avoids re-fetching on restart)
+    cached_posts     = await demo_db.load_today_posts()
+    cached_summaries = await demo_db.load_today_summaries()
+
+    if cached_posts and cached_summaries:
+        print(f"  Loaded {len(cached_posts)} posts from DB cache", flush=True)
+        DB_POSTS.clear()
+        DB_POSTS.extend(cached_posts)
+        DB_SUMMARIES.clear()
+        DB_SUMMARIES.update(cached_summaries)
+        demo_rag.init_rag(_ai_client, DB_POSTS)
+        print("  Ready (from cache)\n", flush=True)
+        return
+
+    print("Fetching from all sources in parallel...", flush=True)
+    raw      = await _fetch_all_sources()
+    filtered = semantic_filter(raw)
+    print(f"  Semantic filter: {len(filtered)} on-topic", flush=True)
 
     ranked   = time_decay_rank(filtered)
-    print(f"  Time-decay ranked", flush=True)
-
     enriched = enrich_posts(ranked)
-    print(f"  Enriched {len(enriched)} posts", flush=True)
-
     deduped  = deduplicate(enriched)
-    print(f"  Deduplicated to {len(deduped)} clusters "
-          f"({sum(1 for p in deduped if p['cross_platform'])} cross-platform)", flush=True)
+    cross    = sum(1 for p in deduped if p.get("cross_platform"))
+    print(f"  Deduplicated to {len(deduped)} clusters ({cross} cross-platform)", flush=True)
 
     summaries = build_summaries(deduped)
-    print(f"  Built summaries for {len(summaries)} topics: {list(summaries.keys())}", flush=True)
+    print(f"  Summaries: {list(summaries.keys())}", flush=True)
 
+    DB_POSTS.clear()
     DB_POSTS.extend(deduped)
+    DB_SUMMARIES.clear()
     DB_SUMMARIES.update(summaries)
-    print("\nReady!  http://localhost:8000\n", flush=True)
+
+    await demo_db.save_posts(deduped)
+    await demo_db.save_summaries(summaries)
+    demo_rag.init_rag(_ai_client, DB_POSTS)
+    print(f"  Persisted to DB. Ready!\n", flush=True)
+
+
+# ── 11. App setup ─────────────────────────────────────────────────────────────
+
+_scheduler = AsyncIOScheduler(timezone="UTC")
 
 
 @asynccontextmanager
 async def lifespan(_app):
-    await load_data()
+    await demo_db.init_db()
+    await run_collection()
+
+    # Daily collection at 07:15 UTC
+    _scheduler.add_job(run_collection, CronTrigger(hour=7, minute=15))
+    _scheduler.start()
+    log.info("Scheduler started — daily collection at 07:15 UTC")
+
     yield
+    _scheduler.shutdown(wait=False)
 
 
 schema      = strawberry.Schema(query=Query)
 graphql_app = GraphQLRouter(schema, graphql_ide="graphiql")
 
-app = FastAPI(title="Social Pulse Demo", lifespan=lifespan)
+app = FastAPI(title="Social Pulse", lifespan=lifespan, root_path=BASE_URL)
 app.include_router(graphql_app, prefix="/graphql")
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "frontend"), name="static")
 
 
+# ── REST endpoints ────────────────────────────────────────────────────────────
+
 @app.get("/health")
 def health():
-    return {"status": "ok", "posts": len(DB_POSTS), "topics": list(DB_SUMMARIES.keys())}
+    return {"status": "ok", "posts": len(DB_POSTS), "topics": list(DB_SUMMARIES.keys()),
+            "next_run": str(_scheduler.get_jobs()[0].next_run_time) if _scheduler.get_jobs() else None}
 
 
 @app.get("/")
 def dashboard():
-    return FileResponse(Path(__file__).parent / "frontend" / "index.html")
+    html = (Path(__file__).parent / "frontend" / "index.html").read_text()
+    html = html.replace("</head>",
+        f'<script>window.BASE_URL="{BASE_URL}";</script></head>', 1)
+    return HTMLResponse(html)
 
 
 class EngageRequest(BaseModel):
@@ -991,7 +1066,6 @@ class EngageRequest(BaseModel):
 
 @app.post("/profile/engage")
 def record_engagement(body: EngageRequest):
-    """Record a user interaction to build the interest profile."""
     for t in body.topics:
         _profile[f"topic:{t}"] = min(_profile[f"topic:{t}"] + 0.15, 2.0)
     if body.platform:
@@ -1002,6 +1076,43 @@ def record_engagement(body: EngageRequest):
 @app.get("/profile")
 def get_profile():
     return {"profile": dict(_profile)}
+
+
+@app.get("/spikes")
+async def get_spikes():
+    """Topics with post volume significantly above their 7-day baseline."""
+    return await demo_db.detect_spikes(threshold=1.5)
+
+
+@app.get("/history/{topic}")
+async def get_history(topic: str, days: int = 30):
+    """Historical daily post counts and sentiment for a topic."""
+    return {"topic": topic, "history": await demo_db.get_history(topic, days)}
+
+
+@app.get("/history")
+async def get_all_history(days: int = 30):
+    """Historical data for all topics."""
+    return await demo_db.get_all_topics_history(days)
+
+
+@app.get("/search")
+async def rag_search(q: str = FQuery(..., description="Natural language query")):
+    """RAG: retrieve relevant posts and synthesize an answer with Claude."""
+    return demo_rag.rag_answer(q)
+
+
+@app.get("/entities")
+def entity_graph():
+    """Co-occurrence graph of named entities for D3.js visualization."""
+    return demo_rag.compute_entity_graph(DB_POSTS)
+
+
+@app.post("/collect/now")
+async def trigger_collection():
+    """Manually trigger a full collection run."""
+    asyncio.create_task(run_collection())
+    return {"status": "collection started"}
 
 
 if __name__ == "__main__":

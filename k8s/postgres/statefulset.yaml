@@ -1,0 +1,64 @@
+# EDUCATIONAL NOTE ─────────────────────────────────────────────────────────────
+# StatefulSet (not Deployment) for PostgreSQL because:
+#   1. Stable network identity (postgres-0 always resolves to the same pod)
+#   2. Ordered startup/shutdown (matters for primary/replica setups)
+#   3. PVC is bound to the pod identity, so data persists across restarts
+# For high availability in production, use CloudNativePG or Zalando Postgres Operator.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: social-pulse
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - configMapRef:  { name: social-pulse-config }
+            - secretRef:     { name: social-pulse-secrets }
+          env:
+            - name: DATABASE_URL
+              value: "postgresql+asyncpg://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:5432/$(POSTGRES_DB)"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init-sql
+              mountPath: /docker-entrypoint-initdb.d
+          resources:
+            requests: { cpu: 250m, memory: 256Mi }
+            limits:   { cpu: 1,    memory: 1Gi  }
+          readinessProbe:
+            exec:
+              command: [pg_isready, -U, pulse]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-pvc
+        - name: init-sql
+          configMap:
+            name: postgres-init-sql
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-sql
+  namespace: social-pulse
+data:
+  init.sql: |
+    -- Social Pulse schema (see db/init.sql for the full version)
+    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";

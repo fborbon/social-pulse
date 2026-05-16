@@ -1,0 +1,36 @@
+# EDUCATIONAL NOTE ─────────────────────────────────────────────────────────────
+# Redis uses a Deployment (not StatefulSet) because we treat it as a cache.
+# Cache misses are acceptable — the API falls back to PostgreSQL.
+# For production persistence or Pub/Sub, use Redis Cluster or Redis Sentinel.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: social-pulse
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: redis }
+  template:
+    metadata:
+      labels: { app: redis }
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+          resources:
+            requests: { cpu: 50m,  memory: 64Mi  }
+            limits:   { cpu: 200m, memory: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: social-pulse
+spec:
+  selector: { app: redis }
+  ports:
+    - port: 6379

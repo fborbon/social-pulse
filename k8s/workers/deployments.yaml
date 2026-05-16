@@ -1,0 +1,110 @@
+# EDUCATIONAL NOTE ─────────────────────────────────────────────────────────────
+# Workers are stateless Kafka consumers — they read a topic, process, publish.
+# Because Kafka partitions define parallelism, replicas must equal the number
+# of partitions for that topic (otherwise extra replicas sit idle).
+#
+# Scale-out example:
+#   kubectl scale deployment enrichment-worker --replicas=3 -n social-pulse
+# Kafka will auto-rebalance partitions across the 3 consumer instances.
+#
+# The HPA (hpa.yaml) automates this based on Kafka consumer lag metric.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: filter-worker
+  namespace: social-pulse
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: filter-worker }
+  template:
+    metadata:
+      labels: { app: filter-worker }
+    spec:
+      containers:
+        - name: filter-worker
+          image: social-pulse/filter-worker:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef: { name: social-pulse-config }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: enrichment-worker
+  namespace: social-pulse
+spec:
+  replicas: 2    # Can scale up to number of partitions on posts.filtered
+  selector:
+    matchLabels: { app: enrichment-worker }
+  template:
+    metadata:
+      labels: { app: enrichment-worker }
+    spec:
+      containers:
+        - name: enrichment-worker
+          image: social-pulse/enrichment-worker:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef: { name: social-pulse-config }
+            - secretRef:    { name: social-pulse-secrets }
+          env:
+            - name: DATABASE_URL
+              value: "postgresql+asyncpg://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)"
+          resources:
+            requests: { cpu: 150m, memory: 128Mi }
+            limits:   { cpu: 1,    memory: 512Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ranking-worker
+  namespace: social-pulse
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: ranking-worker }
+  template:
+    metadata:
+      labels: { app: ranking-worker }
+    spec:
+      containers:
+        - name: ranking-worker
+          image: social-pulse/ranking-worker:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef: { name: social-pulse-config }
+          resources:
+            requests: { cpu: 150m, memory: 256Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: summary-worker
+  namespace: social-pulse
+spec:
+  replicas: 1    # Must be 1 — runs a single daily flush per topic
+  selector:
+    matchLabels: { app: summary-worker }
+  template:
+    metadata:
+      labels: { app: summary-worker }
+    spec:
+      containers:
+        - name: summary-worker
+          image: social-pulse/summary-worker:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef: { name: social-pulse-config }
+            - secretRef:    { name: social-pulse-secrets }
+          env:
+            - name: DATABASE_URL
+              value: "postgresql+asyncpg://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)"
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 512Mi }

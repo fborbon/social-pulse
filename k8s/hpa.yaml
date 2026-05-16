@@ -1,0 +1,57 @@
+# EDUCATIONAL NOTE ─────────────────────────────────────────────────────────────
+# HorizontalPodAutoscaler (HPA) automatically adjusts replica count based on
+# observed metrics. The API is CPU-bound (GraphQL queries), so CPU is a good
+# proxy for load. The enrichment worker is I/O-bound (Kafka + DB), so Kafka
+# consumer lag is a better signal — that requires a custom metrics adapter
+# like KEDA (Kubernetes Event-driven Autoscaling).
+#
+# This demonstrates both approaches:
+#   1. Standard HPA (CPU) for the API
+#   2. KEDA ScaledObject (Kafka lag) for the enrichment worker
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Standard HPA for the API ──────────────────────────────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-hpa
+  namespace: social-pulse
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300   # Wait 5 min before scaling down
+---
+
+# ── KEDA ScaledObject for the enrichment worker (Kafka lag) ──────────────────
+# Requires KEDA: https://keda.sh/docs/deploy/
+# kubectl apply -f https://github.com/kedacore/keda/releases/latest/download/keda.yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: enrichment-worker-scaler
+  namespace: social-pulse
+spec:
+  scaleTargetRef:
+    name: enrichment-worker
+  minReplicaCount: 1
+  maxReplicaCount: 6
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka:9092
+        consumerGroup:    enrichment-worker
+        topic:            posts.filtered
+        lagThreshold:     "50"     # Scale up when lag > 50 messages per partition

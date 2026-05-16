@@ -1,0 +1,27 @@
+# EDUCATIONAL NOTE ─────────────────────────────────────────────────────────────
+# ConfigMaps hold non-sensitive configuration. All pods read from this single
+# source of truth, so changing TRACK_TOPICS here propagates everywhere on
+# the next rollout — no Docker image rebuild needed.
+# Contrast with Secrets (02-secrets.yaml) which hold sensitive values.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: social-pulse-config
+  namespace: social-pulse
+data:
+  KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+  POSTGRES_DB:             "social_pulse"
+  REDIS_URL:               "redis://redis:6379"
+  SEMANTIC_THRESHOLD:      "0.07"
+  DEDUP_THRESHOLD:         "0.55"
+  BASE_URL:                "/social-pulse"
+  RSS_FEEDS: >-
+    https://feeds.bbci.co.uk/news/rss.xml,
+    https://feeds.reuters.com/reuters/topNews,
+    https://feeds.npr.org/1001/rss.xml,
+    https://www.theverge.com/rss/index.xml,
+    https://feeds.arstechnica.com/arstechnica/index,
+    https://techcrunch.com/feed/,
+    https://www.nature.com/nature.rss,
+    https://www.bls.gov/feed/bls_latest.rss

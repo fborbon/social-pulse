@@ -3,183 +3,324 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Social Pulse</title>
+  <title>Social Pulse · Forward Forecasting</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
   <style>
-    body { background: #0f172a; color: #e2e8f0; }
-    .card { background: #1e293b; border: 1px solid #334155; border-radius: 0.75rem; }
+    body { background:#0f172a; color:#e2e8f0; font-family:system-ui,sans-serif; }
+    .card { background:#1e293b; border:1px solid #334155; border-radius:.75rem; }
     .tag  { display:inline-block; padding:2px 8px; border-radius:9999px; font-size:.7rem; font-weight:600; }
     .tag-pos  { background:#14532d; color:#86efac; }
     .tag-neg  { background:#4c0519; color:#fca5a5; }
     .tag-neu  { background:#1e3a5f; color:#93c5fd; }
     .tag-cross { background:#3b1d6b; color:#c4b5fd; }
+    .tag-spike-low  { background:#713f12; color:#fde68a; }
+    .tag-spike-med  { background:#7c2d12; color:#fdba74; }
+    .tag-spike-high { background:#7f1d1d; color:#fca5a5; }
     .pill { display:inline-block; padding:1px 8px; border-radius:9999px; font-size:.65rem; background:#334155; color:#94a3b8; }
     .spinner { border:3px solid #334155; border-top-color:#6366f1; border-radius:50%; width:28px; height:28px; animation:spin .8s linear infinite; margin:2rem auto; }
     @keyframes spin { to{transform:rotate(360deg)} }
     .fade-in { animation:fadeIn .35s ease; }
     @keyframes fadeIn { from{opacity:0;transform:translateY(5px)} to{opacity:1;transform:translateY(0)} }
     .score-bar { height:3px; border-radius:2px; background:#6366f1; transition:width .4s; }
-    #profile-list::-webkit-scrollbar { display:none; }
+    nav button { padding:.375rem .875rem; border-radius:.5rem; font-size:.8rem; font-weight:500; transition:all .15s; }
+    nav button.active { background:#4f46e5; color:#fff; }
+    nav button:not(.active) { color:#94a3b8; }
+    nav button:not(.active):hover { background:#1e293b; color:#e2e8f0; }
+    .panel { display:none; }
+    .panel.active { display:block; }
+    /* D3 entity graph */
+    #entity-svg { width:100%; height:420px; }
+    .node circle { stroke:#334155; stroke-width:1.5px; cursor:pointer; }
+    .node text { font-size:10px; fill:#cbd5e1; pointer-events:none; }
+    .link { stroke:#334155; stroke-opacity:.6; }
+    /* Spike pulse */
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+    .spike-pulse { animation:pulse 2s infinite; }
   </style>
 </head>
-<body class="min-h-screen p-4 md:p-8">
+<body class="min-h-screen p-4 md:p-6">
 
-  <!-- Header -->
-  <div class="flex items-center justify-between mb-8 flex-wrap gap-3">
-    <div>
-      <h1 class="text-2xl font-bold text-white tracking-tight">
-        <span class="text-indigo-400">Social</span> Pulse
-      </h1>
-      <p class="text-slate-400 text-sm mt-0.5">Real-time social intelligence dashboard</p>
-    </div>
-    <div class="flex items-center gap-3 flex-wrap">
-      <label class="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
-        <div class="relative">
-          <input type="checkbox" id="personalized-toggle" class="sr-only peer" onchange="loadPosts()">
-          <div class="w-10 h-5 bg-slate-600 peer-checked:bg-indigo-500 rounded-full transition"></div>
-          <div class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition peer-checked:translate-x-5"></div>
-        </div>
-        Personalized
-      </label>
-      <span id="ws-badge" class="tag tag-neu">● connecting</span>
-      <button onclick="loadAll()"
-        class="text-sm px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition">
-        Refresh
-      </button>
-    </div>
+<!-- Header -->
+<div class="flex items-center justify-between mb-6 flex-wrap gap-3">
+  <div>
+    <h1 class="text-2xl font-bold text-white tracking-tight">
+      <span class="text-indigo-400">Social</span> Pulse
+      <span class="text-slate-500 text-sm font-normal ml-2">by Forward Forecasting</span>
+    </h1>
+    <p class="text-slate-400 text-sm mt-0.5">Real-time social intelligence · <span id="last-updated" class="text-slate-500"></span></p>
   </div>
-
-  <!-- Stat cards -->
-  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8" id="stat-cards">
-    <div class="card p-4"><div class="spinner"></div></div>
-    <div class="card p-4"></div><div class="card p-4"></div><div class="card p-4"></div>
+  <div class="flex items-center gap-2 flex-wrap">
+    <label class="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
+      <div class="relative">
+        <input type="checkbox" id="personalized-toggle" class="sr-only peer" onchange="loadPosts()">
+        <div class="w-10 h-5 bg-slate-600 peer-checked:bg-indigo-500 rounded-full transition"></div>
+        <div class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition peer-checked:translate-x-5"></div>
+      </div>
+      Personalized
+    </label>
+    <span id="ws-badge" class="tag tag-neu">● connecting</span>
+    <button onclick="loadAll()" class="text-sm px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition">Refresh</button>
   </div>
+</div>
 
-  <!-- Charts row -->
-  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+<!-- Stat cards -->
+<div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6" id="stat-cards">
+  <div class="card p-4"><div class="spinner"></div></div>
+  <div class="card p-4"></div><div class="card p-4"></div><div class="card p-4"></div>
+</div>
 
-    <!-- Sentiment chart -->
+<!-- Nav tabs -->
+<nav class="flex gap-1 mb-6 border-b border-slate-700 pb-2">
+  <button class="active" onclick="switchTab('overview')">Overview</button>
+  <button onclick="switchTab('posts')">Posts</button>
+  <button onclick="switchTab('history')">Historical</button>
+  <button onclick="switchTab('entities')">Entity Graph</button>
+  <button onclick="switchTab('search')">RAG Search</button>
+</nav>
+
+<!-- ── OVERVIEW TAB ── -->
+<div id="tab-overview" class="panel active">
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
     <div class="card p-5">
       <h2 class="text-sm font-semibold text-slate-300 mb-4 uppercase tracking-wider">Sentiment by Topic</h2>
       <canvas id="topicChart" height="220"></canvas>
     </div>
-
-    <!-- Daily summary -->
     <div class="card p-5">
       <div class="flex items-center justify-between mb-4">
         <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">Daily Summary</h2>
-        <select id="summary-topic-select"
-          class="bg-slate-700 text-slate-200 text-xs rounded px-2 py-1 border border-slate-600 focus:outline-none"
-          onchange="loadSummary(this.value)"></select>
+        <select id="summary-topic-select" class="bg-slate-700 text-slate-200 text-xs rounded px-2 py-1 border border-slate-600 focus:outline-none" onchange="loadSummary(this.value)"></select>
       </div>
       <div id="summary-box"><div class="spinner"></div></div>
     </div>
   </div>
-
-  <!-- Posts + Profile side by side -->
-  <div class="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-8">
-
-    <!-- Posts feed (2/3 width) -->
-    <div class="card p-5 xl:col-span-2">
-      <div class="flex flex-wrap items-center gap-3 mb-4">
-        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">Posts</h2>
-        <select id="filter-topic"
-          class="bg-slate-700 text-slate-200 text-xs rounded px-2 py-1 border border-slate-600 focus:outline-none"
-          onchange="loadPosts()">
-          <option value="">All topics</option>
-        </select>
-        <select id="filter-sentiment"
-          class="bg-slate-700 text-slate-200 text-xs rounded px-2 py-1 border border-slate-600 focus:outline-none"
-          onchange="loadPosts()">
-          <option value="">All sentiments</option>
-          <option value="positive">Positive</option>
-          <option value="neutral">Neutral</option>
-          <option value="negative">Negative</option>
-        </select>
-        <span class="text-xs text-slate-500 ml-auto">Click a post to record interest</span>
-      </div>
-      <div id="posts-list"><div class="spinner"></div></div>
-    </div>
-
-    <!-- Interest profile (1/3 width) -->
-    <div class="card p-5">
-      <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-1">Your Interest Profile</h2>
-      <p class="text-xs text-slate-500 mb-4">Built from your clicks. Drives personalized ranking.</p>
-      <div id="profile-list" class="space-y-2 max-h-80 overflow-y-auto">
-        <p class="text-slate-500 text-sm">No interactions yet.<br>Click posts to build your profile.</p>
-      </div>
-    </div>
+  <!-- Spikes -->
+  <div class="card p-5 mb-6">
+    <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
+      <span class="spike-pulse inline-block w-2 h-2 rounded-full bg-orange-400 mr-1"></span>
+      Topic Spikes
+    </h2>
+    <div id="spikes-box"><p class="text-slate-500 text-sm">Loading spike detection…</p></div>
   </div>
-
   <!-- Live ticker -->
   <div class="card p-4">
     <div class="flex items-center gap-2 mb-3">
       <span class="w-2 h-2 rounded-full bg-indigo-400 animate-pulse"></span>
       <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">Live Stream</h2>
-      <span class="text-xs text-slate-500">new enriched posts appear here in real time</span>
     </div>
     <div id="live-ticker" class="space-y-2 max-h-48 overflow-y-auto">
       <p class="text-slate-500 text-sm">Waiting for live posts…</p>
     </div>
   </div>
+</div>
+
+<!-- ── POSTS TAB ── -->
+<div id="tab-posts" class="panel">
+  <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
+    <div class="card p-5 xl:col-span-2">
+      <div class="flex flex-wrap items-center gap-3 mb-4">
+        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">Posts</h2>
+        <select id="filter-topic" class="bg-slate-700 text-slate-200 text-xs rounded px-2 py-1 border border-slate-600 focus:outline-none" onchange="loadPosts()">
+          <option value="">All topics</option>
+        </select>
+        <select id="filter-sentiment" class="bg-slate-700 text-slate-200 text-xs rounded px-2 py-1 border border-slate-600 focus:outline-none" onchange="loadPosts()">
+          <option value="">All sentiments</option>
+          <option value="positive">Positive</option>
+          <option value="neutral">Neutral</option>
+          <option value="negative">Negative</option>
+        </select>
+      </div>
+      <div id="posts-list"><div class="spinner"></div></div>
+    </div>
+    <div class="card p-5">
+      <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-1">Interest Profile</h2>
+      <p class="text-xs text-slate-500 mb-4">Click posts to build your profile.</p>
+      <div id="profile-list" class="space-y-2 max-h-80 overflow-y-auto">
+        <p class="text-slate-500 text-sm">No interactions yet.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── HISTORY TAB ── -->
+<div id="tab-history" class="panel">
+  <div class="card p-5 mb-6">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">Post Volume Over Time</h2>
+      <select id="history-topic-select" class="bg-slate-700 text-slate-200 text-xs rounded px-2 py-1 border border-slate-600 focus:outline-none" onchange="loadHistory(this.value)"></select>
+    </div>
+    <canvas id="historyChart" height="180"></canvas>
+    <p class="text-xs text-slate-500 mt-3">Data accumulates daily. Each collection run at 07:15 UTC adds a new data point.</p>
+  </div>
+  <div class="card p-5">
+    <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-4">Sentiment Trend</h2>
+    <canvas id="sentimentHistoryChart" height="160"></canvas>
+  </div>
+</div>
+
+<!-- ── ENTITY GRAPH TAB ── -->
+<div id="tab-entities" class="panel">
+  <div class="card p-5">
+    <div class="flex items-center justify-between mb-3">
+      <div>
+        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">Entity Co-occurrence Network</h2>
+        <p class="text-xs text-slate-500 mt-0.5">Nodes = named entities. Edges = appear together in the same post. Size = frequency.</p>
+      </div>
+      <button onclick="loadEntityGraph()" class="text-xs px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition">Reload</button>
+    </div>
+    <svg id="entity-svg"></svg>
+    <div id="entity-tooltip" class="hidden fixed bg-slate-800 border border-slate-600 rounded p-2 text-xs text-slate-200 pointer-events-none shadow-lg z-50"></div>
+  </div>
+</div>
+
+<!-- ── RAG SEARCH TAB ── -->
+<div id="tab-search" class="panel">
+  <div class="card p-5">
+    <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Ask the News Corpus</h2>
+    <p class="text-xs text-slate-500 mb-4">RAG (Retrieval-Augmented Generation): your question is matched against today's posts using TF-IDF similarity, then Claude synthesizes an answer from the retrieved context.</p>
+    <div class="flex gap-2 mb-6">
+      <input id="search-input" type="text" placeholder="e.g. What's happening with AI regulation?"
+        class="flex-1 bg-slate-700 text-slate-200 text-sm rounded-lg px-4 py-2.5 border border-slate-600 focus:outline-none focus:border-indigo-500 placeholder-slate-500"
+        onkeydown="if(event.key==='Enter') runSearch()">
+      <button onclick="runSearch()" class="px-5 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm transition">Ask</button>
+    </div>
+    <div id="search-result"></div>
+    <div class="mt-6">
+      <p class="text-xs text-slate-500 mb-2 uppercase tracking-wider">Try asking:</p>
+      <div class="flex flex-wrap gap-2">
+        <button onclick="askSuggestion(this)" class="pill cursor-pointer hover:bg-slate-600 transition">What's the latest on AI?</button>
+        <button onclick="askSuggestion(this)" class="pill cursor-pointer hover:bg-slate-600 transition">Any economic concerns today?</button>
+        <button onclick="askSuggestion(this)" class="pill cursor-pointer hover:bg-slate-600 transition">What security threats are trending?</button>
+        <button onclick="askSuggestion(this)" class="pill cursor-pointer hover:bg-slate-600 transition">Climate change news</button>
+        <button onclick="askSuggestion(this)" class="pill cursor-pointer hover:bg-slate-600 transition">Tech industry layoffs</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <script>
-const GQL = '/graphql';
+// ── Config ────────────────────────────────────────────────────────────────────
+const BASE = window.BASE_URL || '';
+const GQL  = BASE + '/graphql';
+const API  = (path) => BASE + path;
+const WS_URL = 'ws://' + location.host + BASE + '/ws/live';
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
 async function gql(query) {
-  const r = await fetch(GQL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query }),
-  });
-  const json = await r.json();
-  return json;
+  const r = await fetch(GQL, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({query}) });
+  return r.json();
 }
 
-// ── Chart ─────────────────────────────────────────────────────────────────────
-let chartInst = null;
+async function api(path) {
+  const r = await fetch(API(path));
+  return r.json();
+}
 
-function renderChart(stats) {
-  if (chartInst) chartInst.destroy();
-  chartInst = new Chart(document.getElementById('topicChart'), {
-    type: 'bar',
-    data: {
-      labels: stats.map(s => s.topic),
-      datasets: [
-        { label:'Positive', data: stats.map(s=>s.positivePct), backgroundColor:'#22c55e', borderRadius:4 },
-        { label:'Neutral',  data: stats.map(s=>s.neutralPct),  backgroundColor:'#6366f1', borderRadius:4 },
-        { label:'Negative', data: stats.map(s=>s.negativePct), backgroundColor:'#ef4444', borderRadius:4 },
-      ],
+function switchTab(name) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  event.target.classList.add('active');
+  if (name === 'posts')    loadPosts();
+  if (name === 'history')  loadHistory(document.getElementById('history-topic-select').value);
+  if (name === 'entities') loadEntityGraph();
+}
+
+// ── Charts ────────────────────────────────────────────────────────────────────
+let topicChartInst = null, histChartInst = null, sentHistChartInst = null;
+const CHART_OPTS = {
+  responsive:true,
+  plugins:{ legend:{ labels:{ color:'#94a3b8', font:{size:11} } } },
+  scales:{
+    x:{ stacked:true, ticks:{color:'#94a3b8'}, grid:{color:'#1e293b'} },
+    y:{ stacked:true, max:100, ticks:{color:'#94a3b8', callback:v=>v+'%'}, grid:{color:'#334155'} },
+  }
+};
+
+function renderTopicChart(stats) {
+  if (topicChartInst) topicChartInst.destroy();
+  topicChartInst = new Chart(document.getElementById('topicChart'), {
+    type:'bar',
+    data:{
+      labels: stats.map(s=>s.topic),
+      datasets:[
+        {label:'Positive', data:stats.map(s=>s.positivePct), backgroundColor:'#22c55e', borderRadius:4},
+        {label:'Neutral',  data:stats.map(s=>s.neutralPct),  backgroundColor:'#6366f1', borderRadius:4},
+        {label:'Negative', data:stats.map(s=>s.negativePct), backgroundColor:'#ef4444', borderRadius:4},
+      ]
     },
-    options: {
-      responsive: true,
-      plugins: { legend: { labels: { color:'#94a3b8', font:{size:11} } } },
-      scales: {
-        x: { stacked:true, ticks:{color:'#94a3b8'}, grid:{color:'#1e293b'} },
-        y: { stacked:true, max:100, ticks:{color:'#94a3b8', callback:v=>v+'%'}, grid:{color:'#334155'} },
-      },
+    options: CHART_OPTS,
+  });
+}
+
+function renderHistoryChart(data, topic) {
+  if (!data.length) return;
+  const labels  = data.map(d=>d.date);
+  const counts  = data.map(d=>d.post_count);
+  const pos     = data.map(d=>Math.round(d.positive_pct*100));
+  const neg     = data.map(d=>Math.round(d.negative_pct*100));
+
+  if (histChartInst) histChartInst.destroy();
+  histChartInst = new Chart(document.getElementById('historyChart'), {
+    type:'line',
+    data:{
+      labels,
+      datasets:[{
+        label:`${topic} — daily posts`,
+        data:counts, fill:true,
+        borderColor:'#6366f1', backgroundColor:'rgba(99,102,241,.15)',
+        tension:.4, pointRadius:4,
+      }]
     },
+    options:{
+      responsive:true,
+      plugins:{ legend:{labels:{color:'#94a3b8'}} },
+      scales:{
+        x:{ticks:{color:'#94a3b8'}, grid:{color:'#1e293b'}},
+        y:{ticks:{color:'#94a3b8'}, grid:{color:'#334155'}, beginAtZero:true},
+      }
+    }
+  });
+
+  if (sentHistChartInst) sentHistChartInst.destroy();
+  sentHistChartInst = new Chart(document.getElementById('sentimentHistoryChart'), {
+    type:'line',
+    data:{
+      labels,
+      datasets:[
+        {label:'Positive %', data:pos, borderColor:'#22c55e', backgroundColor:'transparent', tension:.4},
+        {label:'Negative %', data:neg, borderColor:'#ef4444', backgroundColor:'transparent', tension:.4},
+      ]
+    },
+    options:{
+      responsive:true,
+      plugins:{ legend:{labels:{color:'#94a3b8'}} },
+      scales:{
+        x:{ticks:{color:'#94a3b8'}, grid:{color:'#1e293b'}},
+        y:{ticks:{color:'#94a3b8', callback:v=>v+'%'}, grid:{color:'#334155'}, min:0, max:100},
+      }
+    }
   });
 }
 
 // ── Stat cards ────────────────────────────────────────────────────────────────
-function renderStatCards(stats, posts) {
-  const total    = stats.reduce((a,s)=>a+s.postCount, 0);
-  const clusters = posts.length;
-  const cross    = posts.filter(p=>p.crossPlatform).length;
-  const posAvg   = stats.length ? Math.round(stats.reduce((a,s)=>a+s.positivePct,0)/stats.length) : 0;
+function renderStatCards(stats, posts, spikes) {
+  const total   = stats.reduce((a,s)=>a+s.postCount,0);
+  const cross   = posts.filter(p=>p.crossPlatform).length;
+  const posAvg  = stats.length ? Math.round(stats.reduce((a,s)=>a+s.positivePct,0)/stats.length) : 0;
+  const nSpikes = Object.keys(spikes||{}).length;
 
   const cards = [
-    { label:'Posts Collected',   value:total,             sub:`${clusters} clusters after dedup` },
-    { label:'Active Topics',     value:stats.length,      sub:'semantic match' },
-    { label:'Cross-Platform',    value:cross,             sub:'same story, multiple sources' },
-    { label:'Avg Positive',      value:posAvg+'%',        sub:'sentiment today' },
+    {label:'Posts Today',      value:total,         sub:`${posts.length} clusters after dedup`},
+    {label:'Active Topics',    value:stats.length,  sub:'semantic match'},
+    {label:'Cross-Platform',   value:cross,         sub:'same story, multiple sources'},
+    {label:'Spikes Detected',  value:nSpikes,       sub:nSpikes ? '⚠ above 7-day baseline' : 'within normal range', alert:nSpikes>0},
   ];
   document.getElementById('stat-cards').innerHTML = cards.map(c=>`
-    <div class="card p-4 fade-in">
+    <div class="card p-4 fade-in ${c.alert ? 'border-orange-500/40' : ''}">
       <p class="text-xs text-slate-400 uppercase tracking-wider mb-1">${c.label}</p>
-      <p class="text-2xl font-bold text-white">${c.value}</p>
+      <p class="text-2xl font-bold ${c.alert ? 'text-orange-300' : 'text-white'}">${c.value}</p>
       <p class="text-xs text-slate-500 mt-0.5">${c.sub}</p>
     </div>`).join('');
 }
@@ -187,20 +328,11 @@ function renderStatCards(stats, posts) {
 // ── Summary ───────────────────────────────────────────────────────────────────
 async function loadSummary(topic) {
   document.getElementById('summary-box').innerHTML = '<div class="spinner"></div>';
-  const { data } = await gql(`{ dailySummary(topic:"${topic}") {
-    summaryDate summaryText postCount trendingWords
-    sentiment { positive neutral negative }
-  }}`);
+  const {data} = await gql(`{ dailySummary(topic:"${topic}") { summaryDate summaryText postCount trendingWords sentiment{positive neutral negative} }}`);
   const s = data?.dailySummary;
-  if (!s) {
-    document.getElementById('summary-box').innerHTML =
-      '<p class="text-slate-500 text-sm">No summary yet.</p>';
-    return;
-  }
-  const pos = Math.round(s.sentiment.positive*100);
-  const neu = Math.round(s.sentiment.neutral*100);
-  const neg = Math.round(s.sentiment.negative*100);
-  document.getElementById('summary-box').innerHTML = `
+  if (!s) { document.getElementById('summary-box').innerHTML='<p class="text-slate-500 text-sm">No summary yet.</p>'; return; }
+  const pos=Math.round(s.sentiment.positive*100), neu=Math.round(s.sentiment.neutral*100), neg=Math.round(s.sentiment.negative*100);
+  document.getElementById('summary-box').innerHTML=`
     <div class="fade-in">
       <p class="text-slate-200 text-sm leading-relaxed mb-4">${s.summaryText}</p>
       <div class="flex gap-2 flex-wrap mb-3">
@@ -209,10 +341,38 @@ async function loadSummary(topic) {
         <span class="tag tag-neg">▼ ${neg}% negative</span>
         <span class="text-slate-500 text-xs self-center">${s.postCount} posts</span>
       </div>
-      <div class="flex flex-wrap gap-1">
-        ${s.trendingWords.map(w=>`<span class="pill">${w}</span>`).join('')}
-      </div>
+      <div class="flex flex-wrap gap-1">${s.trendingWords.map(w=>`<span class="pill">${w}</span>`).join('')}</div>
     </div>`;
+}
+
+// ── Spikes ────────────────────────────────────────────────────────────────────
+async function loadSpikes() {
+  const spikes = await api('/spikes');
+  const el = document.getElementById('spikes-box');
+  const entries = Object.entries(spikes);
+  if (!entries.length) {
+    el.innerHTML = '<p class="text-slate-500 text-sm">No significant spikes detected today. All topics within normal range.</p>';
+    return;
+  }
+  el.innerHTML = `<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">` +
+    entries.map(([topic, d]) => {
+      const cls = d.severity==='high'?'tag-spike-high':d.severity==='medium'?'tag-spike-med':'tag-spike-low';
+      return `<div class="bg-slate-700/40 rounded-lg p-3 border border-slate-600 fade-in">
+        <div class="flex items-center justify-between mb-1">
+          <p class="text-sm font-semibold text-slate-200 capitalize">${topic}</p>
+          <span class="tag ${cls}">${d.severity} spike</span>
+        </div>
+        <p class="text-xs text-slate-400">${d.today} posts today vs ${d.baseline} avg (×${d.ratio})</p>
+      </div>`;
+    }).join('') + '</div>';
+  return spikes;
+}
+
+// ── History ───────────────────────────────────────────────────────────────────
+async function loadHistory(topic) {
+  if (!topic) return;
+  const data = await api(`/history/${encodeURIComponent(topic)}?days=30`);
+  renderHistoryChart(data.history || [], topic);
 }
 
 // ── Posts ─────────────────────────────────────────────────────────────────────
@@ -225,167 +385,188 @@ async function loadPosts() {
   const topicArg    = topic     ? `, topic:"${topic}"`         : '';
   const sentArg     = sentiment ? `, sentiment:"${sentiment}"` : '';
   const persArg     = personalized ? ', personalized:true'     : '';
-
-  const { data } = await gql(`{ posts(limit:25${topicArg}${sentArg}${persArg}) {
-    id platform author title body url topicTags rawScore rankedScore
-    timestamp sentiment sentimentScore entities summary
-    clusterId clusterSize platforms crossPlatform topicScores
+  const {data} = await gql(`{ posts(limit:25${topicArg}${sentArg}${persArg}) {
+    id platform author title body url topicTags rawScore rankedScore timestamp
+    sentiment sentimentScore entities summary clusterId clusterSize platforms crossPlatform topicScores
   }}`);
-
   const posts = data?.posts ?? [];
-  if (!posts.length) {
-    document.getElementById('posts-list').innerHTML =
-      '<p class="text-slate-500 text-sm">No posts found.</p>';
-    return;
-  }
-
+  if (!posts.length) { document.getElementById('posts-list').innerHTML='<p class="text-slate-500 text-sm">No posts found.</p>'; return; }
   _maxRanked = Math.max(...posts.map(p=>p.rankedScore), 1);
-
-  document.getElementById('posts-list').innerHTML = `
-    <div class="divide-y divide-slate-700/60">
-      ${posts.map(p => renderPost(p)).join('')}
-    </div>`;
+  document.getElementById('posts-list').innerHTML = `<div class="divide-y divide-slate-700/60">${posts.map(renderPost).join('')}</div>`;
 }
 
 function renderPost(p) {
   const sClass = p.sentiment==='positive'?'tag-pos':p.sentiment==='negative'?'tag-neg':'tag-neu';
-  const title  = p.url
-    ? `<a href="${p.url}" target="_blank" class="hover:text-indigo-300 transition">${p.title||p.summary}</a>`
-    : (p.title||p.summary||'(no title)');
-
-  const crossBadge = p.crossPlatform
-    ? `<span class="tag tag-cross" title="Same story on: ${p.platforms.join(', ')}">⬡ ${p.platforms.length} sources</span>`
-    : '';
-
-  const clusterBadge = p.clusterSize > 1
-    ? `<span class="pill" title="${p.clusterSize} similar posts merged">×${p.clusterSize}</span>`
-    : '';
-
-  const scoreWidth = Math.round((p.rankedScore / _maxRanked) * 100);
+  const title  = p.url ? `<a href="${p.url}" target="_blank" class="hover:text-indigo-300 transition">${p.title||p.summary}</a>` : (p.title||p.summary||'(no title)');
+  const crossBadge = p.crossPlatform ? `<span class="tag tag-cross" title="Sources: ${p.platforms.join(', ')}">⬡ ${p.platforms.length} sources</span>` : '';
+  const scoreWidth = Math.round((p.rankedScore/_maxRanked)*100);
   const tags = (p.topicTags||[]).slice(0,3).map(t=>`<span class="pill cursor-pointer hover:bg-indigo-700 transition" onclick="engageTopic('${t}')">${t}</span>`).join('');
+  return `<div class="py-3 fade-in cursor-pointer hover:bg-slate-700/30 rounded px-2 -mx-2 transition" onclick="onPostClick('${p.platform}', ${JSON.stringify(p.topicTags||[]).replace(/"/g,'&quot;')})">
+    <div class="flex items-start justify-between gap-2">
+      <p class="text-sm text-slate-200 font-medium leading-snug">${title}</p>
+      <div class="flex gap-1 shrink-0 flex-wrap justify-end">${crossBadge}<span class="tag ${sClass}">${p.sentiment||'—'}</span></div>
+    </div>
+    <div class="score-bar mt-1.5" style="width:${scoreWidth}%"></div>
+    <div class="flex items-center gap-2 mt-1.5 flex-wrap">
+      <span class="text-xs text-slate-500">${p.platform}</span>
+      <span class="text-xs text-slate-600">·</span>
+      <span class="text-xs text-slate-500">⬆ ${p.rankedScore?.toFixed(1)}</span>
+      <span class="text-xs text-slate-600">·</span>
+      ${tags}
+    </div>
+    ${p.summary && p.summary!==p.title ? `<p class="text-xs text-slate-400 mt-1 line-clamp-2">${p.summary}</p>` : ''}
+  </div>`;
+}
 
-  return `
-    <div class="py-3 fade-in cursor-pointer hover:bg-slate-700/30 rounded px-2 -mx-2 transition"
-         onclick="onPostClick('${p.platform}', ${JSON.stringify(p.topicTags||[]).replace(/"/g,'&quot;')})">
-      <div class="flex items-start justify-between gap-2">
-        <p class="text-sm text-slate-200 font-medium leading-snug">${title}</p>
-        <div class="flex gap-1 shrink-0 flex-wrap justify-end">
-          ${crossBadge}
-          <span class="tag ${sClass}">${p.sentiment||'—'}</span>
-        </div>
-      </div>
-      <div class="score-bar mt-1.5" style="width:${scoreWidth}%"></div>
-      <div class="flex items-center gap-2 mt-1.5 flex-wrap">
-        <span class="text-xs text-slate-500">${p.platform}</span>
-        <span class="text-xs text-slate-600">·</span>
-        <span class="text-xs text-slate-500" title="Time-decayed rank score">⬆ ${p.rankedScore.toFixed(1)}</span>
-        <span class="text-xs text-slate-600">·</span>
-        <span class="text-xs text-slate-500">raw ${p.rawScore}</span>
-        ${clusterBadge ? '<span class="text-slate-600 text-xs">·</span>' + clusterBadge : ''}
-        <span class="text-xs text-slate-600">·</span>
-        ${tags}
-      </div>
-      ${p.summary && p.summary!==p.title
-        ? `<p class="text-xs text-slate-400 mt-1 line-clamp-2">${p.summary}</p>` : ''}
-    </div>`;
+// ── Entity graph ──────────────────────────────────────────────────────────────
+async function loadEntityGraph() {
+  const svg  = d3.select('#entity-svg');
+  svg.selectAll('*').remove();
+  svg.append('text').attr('x','50%').attr('y','50%').attr('text-anchor','middle').attr('fill','#475569').attr('font-size',13).text('Loading entity graph…');
+
+  const data = await api('/entities');
+  svg.selectAll('*').remove();
+
+  if (!data.nodes?.length) {
+    svg.append('text').attr('x','50%').attr('y','50%').attr('text-anchor','middle').attr('fill','#475569').attr('font-size',13).text('Not enough data yet. Check back after collection runs.');
+    return;
+  }
+
+  const w = document.getElementById('entity-svg').clientWidth;
+  const h = 420;
+  const color = d3.scaleOrdinal(d3.schemeTableau10);
+
+  const sim = d3.forceSimulation(data.nodes)
+    .force('link', d3.forceLink(data.links).id(d=>d.id).distance(80))
+    .force('charge', d3.forceManyBody().strength(-120))
+    .force('center', d3.forceCenter(w/2, h/2))
+    .force('collision', d3.forceCollide().radius(d=>Math.sqrt(d.count)*6+8));
+
+  const link = svg.append('g').selectAll('line').data(data.links).join('line')
+    .attr('class','link').attr('stroke-width', d=>Math.sqrt(d.weight));
+
+  const node = svg.append('g').selectAll('g').data(data.nodes).join('g').attr('class','node')
+    .call(d3.drag()
+      .on('start', (ev,d) => { if(!ev.active) sim.alphaTarget(.3).restart(); d.fx=d.x; d.fy=d.y; })
+      .on('drag',  (ev,d) => { d.fx=ev.x; d.fy=ev.y; })
+      .on('end',   (ev,d) => { if(!ev.active) sim.alphaTarget(0); d.fx=null; d.fy=null; }));
+
+  const tooltip = document.getElementById('entity-tooltip');
+  node.append('circle')
+    .attr('r', d=>Math.max(6, Math.sqrt(d.count)*5))
+    .attr('fill', d=>color(d.group))
+    .attr('fill-opacity',.8)
+    .on('mouseover',(ev,d)=>{ tooltip.classList.remove('hidden'); tooltip.textContent=`${d.id} — ${d.count} mentions`; })
+    .on('mousemove',(ev)=>{ tooltip.style.left=(ev.clientX+12)+'px'; tooltip.style.top=(ev.clientY-8)+'px'; })
+    .on('mouseout', ()=>tooltip.classList.add('hidden'));
+
+  node.append('text').attr('dx',d=>Math.sqrt(d.count)*5+4).attr('dy',4).text(d=>d.id.length>15?d.id.slice(0,14)+'…':d.id);
+
+  sim.on('tick', () => {
+    link.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y).attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
+    node.attr('transform',d=>`translate(${Math.max(20,Math.min(w-20,d.x))},${Math.max(20,Math.min(h-20,d.y))})`);
+  });
+}
+
+// ── RAG search ────────────────────────────────────────────────────────────────
+async function runSearch() {
+  const q = document.getElementById('search-input').value.trim();
+  if (!q) return;
+  const el = document.getElementById('search-result');
+  el.innerHTML = '<div class="spinner"></div>';
+  const data = await api(`/search?q=${encodeURIComponent(q)}`);
+  el.innerHTML = `
+    <div class="bg-slate-700/40 rounded-lg p-4 mb-4 fade-in">
+      <p class="text-indigo-300 text-xs uppercase tracking-wider mb-2">Claude's Answer</p>
+      <p class="text-slate-200 text-sm leading-relaxed">${data.answer || 'No answer generated.'}</p>
+    </div>
+    ${data.sources?.length ? `
+    <p class="text-xs text-slate-500 uppercase tracking-wider mb-2">Retrieved Sources (by TF-IDF relevance)</p>
+    <div class="space-y-2">${data.sources.map(s=>`
+      <div class="bg-slate-800 rounded p-2 flex items-start gap-2">
+        <span class="pill shrink-0">${s.platform}</span>
+        <span class="text-xs text-slate-300">${s.url?`<a href="${s.url}" target="_blank" class="hover:text-indigo-300">${s.title||s.url}</a>`:s.title||'(no title)'}</span>
+        <span class="text-xs text-slate-500 ml-auto shrink-0">sim ${s.relevance?.toFixed(2)}</span>
+      </div>`).join('')}</div>` : ''}`;
+}
+
+function askSuggestion(btn) {
+  document.getElementById('search-input').value = btn.textContent;
+  runSearch();
 }
 
 // ── Interest profile ──────────────────────────────────────────────────────────
 async function onPostClick(platform, topics) {
-  await fetch('/profile/engage', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ platform, topics }),
-  });
+  await fetch(API('/profile/engage'), { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({platform, topics}) });
   refreshProfile();
   if (document.getElementById('personalized-toggle').checked) loadPosts();
 }
 
 async function engageTopic(topic) {
-  await fetch('/profile/engage', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ platform: '', topics: [topic] }),
-  });
+  await fetch(API('/profile/engage'), { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({platform:'', topics:[topic]}) });
   refreshProfile();
 }
 
 async function refreshProfile() {
-  const { data } = await gql('{ interestProfile { key weight } }');
-  const entries  = data?.interestProfile ?? [];
-  const el       = document.getElementById('profile-list');
-  if (!entries.length) {
-    el.innerHTML = '<p class="text-slate-500 text-sm">No interactions yet.<br>Click posts to build your profile.</p>';
-    return;
-  }
-  const max = Math.max(...entries.map(e=>e.weight), 0.01);
+  const {data} = await gql('{ interestProfile { key weight } }');
+  const entries = data?.interestProfile ?? [];
+  const el = document.getElementById('profile-list');
+  if (!entries.length) { el.innerHTML='<p class="text-slate-500 text-sm">No interactions yet.</p>'; return; }
+  const max = Math.max(...entries.map(e=>e.weight), .01);
   el.innerHTML = entries.map(e => {
-    const pct   = Math.round(e.weight / max * 100);
-    const label = e.key.replace(/^(topic|platform):/, '');
+    const pct   = Math.round(e.weight/max*100);
+    const label = e.key.replace(/^(topic|platform):/,'');
     const kind  = e.key.startsWith('topic:') ? 'text-indigo-300' : 'text-emerald-300';
-    return `
-      <div class="fade-in">
-        <div class="flex justify-between text-xs mb-0.5">
-          <span class="${kind}">${label}</span>
-          <span class="text-slate-500">${e.weight.toFixed(2)}</span>
-        </div>
-        <div class="h-1 rounded bg-slate-700">
-          <div class="h-1 rounded bg-indigo-500 transition-all" style="width:${pct}%"></div>
-        </div>
-      </div>`;
+    return `<div class="fade-in"><div class="flex justify-between text-xs mb-0.5"><span class="${kind}">${label}</span><span class="text-slate-500">${e.weight.toFixed(2)}</span></div><div class="h-1 rounded bg-slate-700"><div class="h-1 rounded bg-indigo-500 transition-all" style="width:${pct}%"></div></div></div>`;
   }).join('');
 }
 
 // ── Topic dropdowns ───────────────────────────────────────────────────────────
 function populateTopicSelects(stats) {
-  const topics  = stats.map(s => s.topic);
-  const filterS = document.getElementById('filter-topic');
-  const sumS    = document.getElementById('summary-topic-select');
-  filterS.innerHTML = '<option value="">All topics</option>' +
-    topics.map(t=>`<option value="${t}">${t}</option>`).join('');
-  sumS.innerHTML = topics.map(t=>`<option value="${t}">${t}</option>`).join('');
+  const topics = stats.map(s=>s.topic);
+  document.getElementById('filter-topic').innerHTML     = '<option value="">All topics</option>' + topics.map(t=>`<option value="${t}">${t}</option>`).join('');
+  document.getElementById('summary-topic-select').innerHTML = topics.map(t=>`<option value="${t}">${t}</option>`).join('');
+  document.getElementById('history-topic-select').innerHTML = topics.map(t=>`<option value="${t}">${t}</option>`).join('');
 }
 
 // ── WebSocket live ticker ─────────────────────────────────────────────────────
 function connectLive() {
-  const ws     = new WebSocket(`ws://${location.host}/ws/live`);
-  const badge  = document.getElementById('ws-badge');
+  const ws = new WebSocket(WS_URL);
+  const badge = document.getElementById('ws-badge');
   const ticker = document.getElementById('live-ticker');
-
   ws.onopen  = () => { badge.className='tag tag-pos'; badge.textContent='● live'; };
   ws.onclose = () => { badge.className='tag tag-neg'; badge.textContent='● offline'; setTimeout(connectLive,3000); };
-
-  ws.onmessage = ({ data }) => {
-    const p      = JSON.parse(data);
+  ws.onmessage = ({data}) => {
+    const p = JSON.parse(data);
     const sClass = p.sentiment==='positive'?'tag-pos':p.sentiment==='negative'?'tag-neg':'tag-neu';
-    const el     = document.createElement('div');
-    el.className = 'flex items-center gap-2 text-xs text-slate-300 fade-in';
-    el.innerHTML = `
-      <span class="tag ${sClass} shrink-0">${p.sentiment||'—'}</span>
-      <span class="pill shrink-0">${p.platform}</span>
-      ${p.cross_platform ? '<span class="tag tag-cross shrink-0">⬡ cross</span>' : ''}
-      <span class="truncate">${p.title||p.body?.slice(0,80)||'—'}</span>
-      <span class="text-slate-500 shrink-0">↑${p.raw_score||0}</span>`;
-    if (ticker.firstChild?.tagName==='P') ticker.innerHTML='';
+    const el = document.createElement('div');
+    el.className='flex items-center gap-2 text-xs text-slate-300 fade-in';
+    el.innerHTML=`<span class="tag ${sClass} shrink-0">${p.sentiment||'—'}</span><span class="pill shrink-0">${p.platform}</span><span class="truncate">${p.title||p.body?.slice(0,80)||'—'}</span><span class="text-slate-500 shrink-0">↑${p.raw_score||0}</span>`;
+    if(ticker.firstChild?.tagName==='P') ticker.innerHTML='';
     ticker.prepend(el);
-    if (ticker.children.length > 30) ticker.lastChild?.remove();
+    if(ticker.children.length>30) ticker.lastChild?.remove();
   };
 }
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 async function loadAll() {
-  const [statsRes, postsRes] = await Promise.all([
+  const [statsRes, postsRes, spikes] = await Promise.all([
     gql('{ topicStats { topic postCount positivePct neutralPct negativePct } }'),
     gql('{ posts(limit:50) { platform rankedScore crossPlatform topicTags } }'),
+    api('/spikes'),
   ]);
   const stats = statsRes.data?.topicStats ?? [];
   const posts = postsRes.data?.posts ?? [];
 
-  renderStatCards(stats, posts);
-  renderChart(stats);
+  document.getElementById('last-updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
+  renderStatCards(stats, posts, spikes);
+  renderTopicChart(stats);
   populateTopicSelects(stats);
-  if (stats.length) loadSummary(stats[0].topic);
-  loadPosts();
+  if (stats.length) {
+    loadSummary(stats[0].topic);
+    loadHistory(stats[0].topic);
+  }
+  loadSpikes();
   refreshProfile();
 }
 

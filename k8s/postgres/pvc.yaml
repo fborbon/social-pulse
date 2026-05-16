@@ -1,0 +1,17 @@
+# EDUCATIONAL NOTE ─────────────────────────────────────────────────────────────
+# PersistentVolumeClaim (PVC) requests durable storage from the cluster.
+# Without this, pod restarts erase all database data.
+# StorageClass "standard" maps to whatever the cluster provides (EBS on AWS,
+# Persistent Disk on GCP, Azure Disk on AKS, hostPath on minikube).
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: social-pulse
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 10Gi

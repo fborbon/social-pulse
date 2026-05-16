@@ -1,0 +1,37 @@
+# EDUCATIONAL NOTE ─────────────────────────────────────────────────────────────
+# Ingress is the cluster's front door — it terminates TLS and routes HTTP
+# traffic to the correct Service based on host and path rules.
+# This example uses nginx-ingress-controller with cert-manager for automatic
+# Let's Encrypt certificates. The annotation triggers certificate provisioning.
+#
+# Apply with:
+#   kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/cloud/deploy.yaml
+#   kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: social-pulse-ingress
+  namespace: social-pulse
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target:    /$2
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"   # WebSocket keepalive
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    cert-manager.io/cluster-issuer:                letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - www.forwardforecasting.eu
+      secretName: forwardforecasting-tls
+  rules:
+    - host: www.forwardforecasting.eu
+      http:
+        paths:
+          - path: /social-pulse(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: api
+                port:
+                  number: 80

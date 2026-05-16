@@ -1,0 +1,78 @@
+# EDUCATIONAL NOTE ─────────────────────────────────────────────────────────────
+# Kafka is also a StatefulSet because each broker needs a stable identity
+# (broker.id=0 must always be the same pod) and its own PVC for the log segments.
+# In production use Strimzi Operator or Confluent for Kubernetes — they add
+# topic management, TLS, quotas, and schema registry out of the box.
+# Kafka 3.x can run without ZooKeeper (KRaft mode), but we keep ZooKeeper
+# here for educational clarity since it's still widely deployed.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: zookeeper
+  namespace: social-pulse
+spec:
+  serviceName: zookeeper
+  replicas: 1
+  selector:
+    matchLabels: { app: zookeeper }
+  template:
+    metadata:
+      labels: { app: zookeeper }
+    spec:
+      containers:
+        - name: zookeeper
+          image: confluentinc/cp-zookeeper:7.6.0
+          ports:
+            - containerPort: 2181
+          env:
+            - name: ZOOKEEPER_CLIENT_PORT
+              value: "2181"
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: social-pulse
+spec:
+  serviceName: kafka
+  replicas: 1             # Scale to 3+ for production HA
+  selector:
+    matchLabels: { app: kafka }
+  template:
+    metadata:
+      labels: { app: kafka }
+    spec:
+      containers:
+        - name: kafka
+          image: confluentinc/cp-kafka:7.6.0
+          ports:
+            - containerPort: 9092
+          env:
+            - name: KAFKA_BROKER_ID
+              value: "1"
+            - name: KAFKA_ZOOKEEPER_CONNECT
+              value: "zookeeper:2181"
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: "PLAINTEXT://kafka:9092"
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"              # Set to 3 in production
+            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+              value: "true"
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits:   { cpu: 1,    memory: 2Gi  }
+          volumeMounts:
+            - name: kafka-data
+              mountPath: /var/lib/kafka/data
+  volumeClaimTemplates:
+    - metadata:
+        name: kafka-data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 20Gi

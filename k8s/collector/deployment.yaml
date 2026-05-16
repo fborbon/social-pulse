@@ -1,0 +1,48 @@
+# EDUCATIONAL NOTE ─────────────────────────────────────────────────────────────
+# The collector is stateless — it fetches from APIs and publishes to Kafka.
+# replicas: 1 because running 2 collectors would double-publish every post.
+# A CronJob would also work, but Deployment gives us always-on HTTP triggers
+# (POST /collect/all) without cold-start latency.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: collector
+  namespace: social-pulse
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: collector }
+  template:
+    metadata:
+      labels: { app: collector }
+    spec:
+      containers:
+        - name: collector
+          image: social-pulse/collector:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8001
+          envFrom:
+            - configMapRef: { name: social-pulse-config }
+            - secretRef:    { name: social-pulse-secrets }
+          env:
+            - name: DATABASE_URL
+              value: "postgresql+asyncpg://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)"
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+          livenessProbe:
+            httpGet: { path: /health, port: 8001 }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: collector
+  namespace: social-pulse
+spec:
+  selector: { app: collector }
+  ports:
+    - port: 8001
