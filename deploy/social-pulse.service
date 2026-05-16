@@ -1,0 +1,20 @@
+[Unit]
+Description=Social Pulse Analyzer
+Documentation=https://github.com/fborbon/social-pulse
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/social-pulse
+ExecStart=/usr/bin/python3 demo.py
+Restart=always
+RestartSec=15
+Environment=BASE_URL=/social-pulse
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=social-pulse
+
+[Install]
+WantedBy=multi-user.target
