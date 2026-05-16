@@ -16,11 +16,11 @@ import signal
 from collections import Counter, defaultdict
 from datetime import date, datetime, timezone
 
-import anthropic
+import boto3
 import asyncpg
 from aiokafka import AIOKafkaConsumer
 
-_ai = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
+_bedrock = boto3.client("bedrock-runtime", region_name=os.getenv("AWS_REGION", "eu-west-1"))
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("summary-worker")
@@ -49,43 +49,48 @@ def _trending_words(posts: list[dict], top_n: int = 10) -> list[str]:
 
 
 def _build_summary_text(topic: str, posts: list[dict], sentiments: dict) -> str:
-    total = len(posts)
+    import json as _json
+    total   = len(posts)
     pos_pct = round(sentiments["positive"] / total * 100)
     neg_pct = round(sentiments["negative"] / total * 100)
     neu_pct = 100 - pos_pct - neg_pct
 
     titles = "\n".join(
-        f"- {p.get('title') or p.get('body','')[:80]} (score: {p.get('raw_score', 0)}, sentiment: {p.get('sentiment','neutral')})"
+        f"- {p.get('title') or p.get('body','')[:80]} "
+        f"(score: {p.get('raw_score', 0)}, sentiment: {p.get('sentiment','neutral')})"
         for p in sorted(posts, key=lambda x: x.get("raw_score", 0), reverse=True)[:20]
     )
 
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key:
+    try:
+        body = _json.dumps({
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 300,
+            "system": (
+                "You are a social media analyst writing concise daily briefings. "
+                "Be factual, neutral, and highlight the most significant stories. "
+                "Write 2-3 sentences maximum."
+            ),
+            "messages": [{"role": "user", "content": (
+                f"Write a daily briefing for the topic '{topic}' based on these "
+                f"{total} posts from today ({pos_pct}% positive, {neu_pct}% neutral, "
+                f"{neg_pct}% negative):\n\n{titles}"
+            )}],
+        })
+        resp = _bedrock.invoke_model(
+            modelId="anthropic.claude-3-haiku-20240307-v1:0",
+            body=body,
+            contentType="application/json",
+            accept="application/json",
+        )
+        return _json.loads(resp["body"].read())["content"][0]["text"]
+    except Exception as e:
+        log.warning("Bedrock summary failed: %s", e)
         trending = _trending_words(posts, 5)
         return (
             f"Topic '{topic}': {total} posts today. "
             f"Sentiment: {pos_pct}% positive, {neu_pct}% neutral, {neg_pct}% negative. "
             f"Trending: {', '.join(trending)}."
         )
-
-    response = _ai.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=300,
-        system=(
-            "You are a social media analyst writing concise daily briefings. "
-            "Be factual, neutral, and highlight the most significant stories. "
-            "Write 2-3 sentences maximum."
-        ),
-        messages=[{
-            "role": "user",
-            "content": (
-                f"Write a daily briefing for the topic '{topic}' based on these {total} posts from today "
-                f"({pos_pct}% positive sentiment, {neu_pct}% neutral, {neg_pct}% negative):\n\n"
-                f"{titles}"
-            ),
-        }],
-    )
-    return response.content[0].text
 
 
 async def flush_summaries(pool: asyncpg.Pool, target_date: str):

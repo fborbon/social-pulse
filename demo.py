@@ -22,7 +22,6 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone, date
 from typing import Optional
 
-import anthropic
 import aiohttp
 import numpy as np
 import uvicorn
@@ -37,6 +36,7 @@ from pydantic import BaseModel
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
+import bedrock_client
 import demo_db
 import demo_rag
 
@@ -703,10 +703,7 @@ def personalized_score(post: dict) -> float:
     return round(score, 3)
 
 
-# ── 7. AI summaries ───────────────────────────────────────────────────────────
-
-_ai_client = anthropic.Anthropic()
-
+# ── 7. AI summaries (AWS Bedrock — Claude 3 Haiku) ───────────────────────────
 
 def _ai_summary(topic: str, posts: list[dict], pos_pct: int, neu_pct: int, neg_pct: int) -> str:
     titles = "\n".join(
@@ -714,34 +711,32 @@ def _ai_summary(topic: str, posts: list[dict], pos_pct: int, neu_pct: int, neg_p
         f"(score: {p.get('raw_score',0)}, sentiment: {p.get('sentiment','neutral')})"
         for p in sorted(posts, key=lambda x: x.get("ranked_score", 0), reverse=True)[:20]
     )
-    try:
-        resp = _ai_client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=300,
-            system=(
-                "You are a social media analyst writing concise daily briefings. "
-                "Be factual, neutral, and highlight the most significant stories. "
-                "Write 2-3 sentences maximum."
-            ),
-            messages=[{"role": "user", "content": (
-                f"Write a daily briefing for the topic '{topic}' based on these "
-                f"{len(posts)} posts from today "
-                f"({pos_pct}% positive, {neu_pct}% neutral, {neg_pct}% negative):\n\n{titles}"
-            )}],
-        )
-        return resp.content[0].text
-    except Exception as e:
-        log.warning("AI summary failed (%s), using template fallback", e)
-        trending = [w for w, _ in Counter(
-            w for p in posts
-            for w in re.findall(r"\b[a-zA-Z]{4,}\b", (p.get("title","") + " " + p.get("body","")).lower())
-            if w not in STOP_WORDS
-        ).most_common(5)]
-        return (
-            f"Topic '{topic}': {len(posts)} posts today. "
-            f"Sentiment: {pos_pct}% positive, {neu_pct}% neutral, {neg_pct}% negative. "
-            f"Trending: {', '.join(trending)}."
-        )
+    answer = bedrock_client.invoke(
+        system=(
+            "You are a social media analyst writing concise daily briefings. "
+            "Be factual, neutral, and highlight the most significant stories. "
+            "Write 2-3 sentences maximum."
+        ),
+        user=(
+            f"Write a daily briefing for the topic '{topic}' based on these "
+            f"{len(posts)} posts from today "
+            f"({pos_pct}% positive, {neu_pct}% neutral, {neg_pct}% negative):\n\n{titles}"
+        ),
+        max_tokens=300,
+    )
+    if answer:
+        return answer
+    # Template fallback when Bedrock is not yet reachable (e.g. IAM role not attached)
+    trending = [w for w, _ in Counter(
+        w for p in posts
+        for w in re.findall(r"\b[a-zA-Z]{4,}\b", (p.get("title","") + " " + p.get("body","")).lower())
+        if w not in STOP_WORDS
+    ).most_common(5)]
+    return (
+        f"Topic '{topic}': {len(posts)} posts today. "
+        f"Sentiment: {pos_pct}% positive, {neu_pct}% neutral, {neg_pct}% negative. "
+        f"Trending: {', '.join(trending)}."
+    )
 
 
 def build_summaries(posts: list[dict]) -> dict:
@@ -987,7 +982,7 @@ async def run_collection() -> None:
         DB_POSTS.extend(cached_posts)
         DB_SUMMARIES.clear()
         DB_SUMMARIES.update(cached_summaries)
-        demo_rag.init_rag(_ai_client, DB_POSTS)
+        demo_rag.init_rag(DB_POSTS)
         print("  Ready (from cache)\n", flush=True)
         return
 
@@ -1012,7 +1007,7 @@ async def run_collection() -> None:
 
     await demo_db.save_posts(deduped)
     await demo_db.save_summaries(summaries)
-    demo_rag.init_rag(_ai_client, DB_POSTS)
+    demo_rag.init_rag(DB_POSTS)
     print(f"  Persisted to DB. Ready!\n", flush=True)
 
 
