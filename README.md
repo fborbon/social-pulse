@@ -1,6 +1,8 @@
 # Social Pulse Analyzer
 
-An educational, production-inspired platform that monitors social media and news sources, streams events through Apache Kafka, enriches posts with automated analysis, and generates AI-written daily briefings via Claude. A GraphQL API and browser dashboard expose the results in real time.
+An educational, production-inspired platform that monitors social media and news sources, streams events through Apache Kafka, enriches posts with automated analysis, and generates AI-written daily briefings via a Large Language Model (LLM). A FastAPI application serving GraphQL and WebSocket exposes the results in real time from a browser dashboard.
+
+**Live demo:** [https://www.forwardforecasting.eu/social-pulse/](https://www.forwardforecasting.eu/social-pulse/)
 
 ---
 
@@ -9,11 +11,13 @@ An educational, production-inspired platform that monitors social media and news
 - [Architecture Overview](#architecture-overview)
 - [Data Processing Pipeline](#data-processing-pipeline)
 - [Data Flow Diagram](#data-flow-diagram)
+- [FastAPI — the Core Framework](#fastapi--the-core-framework)
 - [Technologies](#technologies)
 - [Libraries](#libraries)
 - [AI & Machine Learning](#ai--machine-learning)
 - [Database Schema](#database-schema)
 - [Demo vs Full Stack](#demo-vs-full-stack)
+- [Cost Analysis](#cost-analysis)
 - [Getting Started](#getting-started)
 
 ---
@@ -32,11 +36,11 @@ Data Sources  →  Collector  →  Kafka  →  Filter Worker
 
 | Service | Port | Role |
 |---|---|---|
-| `collector` | 8001 | Pulls from external APIs, publishes raw posts |
+| `collector` | 8001 | FastAPI app — pulls from external APIs, publishes raw posts |
 | `filter-worker` | — | Tags posts by tracked topic keywords |
 | `enrichment-worker` | — | Adds sentiment, entities, and per-post summaries |
-| `summary-worker` | — | Builds daily AI briefings via Claude |
-| `api` | 8000 | GraphQL query layer + WebSocket live stream |
+| `summary-worker` | — | Builds daily LLM briefings via AWS Bedrock |
+| `api` | 8000 | FastAPI app — GraphQL query layer + WebSocket live stream |
 | `kafka-ui` | 8080 | Visual Kafka topic browser |
 
 ---
@@ -45,89 +49,133 @@ Data Sources  →  Collector  →  Kafka  →  Filter Worker
 
 ### Step 1 — Collection
 
-**Service:** `collector/main.py`
+**Service:** `collector/main.py` (full stack) · `demo.py` (demo)
 
-The collector is a FastAPI application with a background task that fires every 15 minutes. It calls four source adapters in parallel and normalizes each result into a `RawPost` Pydantic model with a common schema:
+The collector is a **FastAPI** application with a background task that fires every 15 minutes. It calls source adapters in parallel and normalizes each result into a `RawPost` Pydantic model with a common schema:
 
 ```
 platform, external_id, author, title, body, url, raw_score, timestamp
 ```
 
-Each normalized post is published to the `posts.raw` Kafka topic. The service also exposes REST endpoints (`POST /collect/{source}`, `POST /collect/all`) so collection can be triggered manually at any time.
+Each normalized post is published to the `posts.raw` Kafka topic. The service also exposes REST endpoints (`POST /collect/{source}`, `POST /collect/all`) so collection can be triggered manually at any time. In the deployed demo, collection is scheduled by **APScheduler** at **07:15 UTC daily** and can be triggered on demand via `POST /collect/now`.
 
-**Sources:**
-- **HackerNews** — top stories via the public Firebase REST API (no auth required)
-- **Reddit** — hot posts from topic-relevant subreddits via the PRAW async API
-- **RSS Feeds** — any URL list configured in `.env`, parsed with feedparser
-- **Mastodon** — public timeline of any instance via the Mastodon.py client
+**Sources (13 total):**
+
+| Source | Auth | Volume |
+|---|---|---|
+| HackerNews | None (public Firebase API) | 40 posts |
+| Lobste.rs | None (public JSON API) | 25 posts |
+| Dev.to | None (public API) | 25 posts |
+| Lemmy | None (public JSON API) | 25 posts |
+| Bluesky | App password | 0–25 posts |
+| arXiv | None (public API) | 21 posts |
+| GDELT | None (public API, 1 req/5s) | 12 posts |
+| SEC EDGAR | None (public API) | 12 posts |
+| Federal Register | None (public API) | 11 posts |
+| RSS bundle (BBC, Reuters, NPR, Verge, Ars, TechCrunch, Nature, BLS, IGN) | None | 168 posts |
+| The Guardian | API key | 0 posts (key optional) |
+| NewsAPI | API key | 0 posts (key optional) |
+| NY Times | API key | 0 posts (key optional) |
 
 ---
 
-### Step 2 — Filtering
+### Step 2 — Semantic Filtering
 
-**Service:** `workers/filter_worker/main.py`  
+**Service:** `workers/filter_worker/main.py` (full stack) · `demo.py:semantic_filter()` (demo)  
 **Consumes:** `posts.raw`  
 **Produces:** `posts.filtered`
 
-The filter worker is a long-running Kafka consumer. For each incoming post it scans the combined `title + body` text for any of the configured topic keywords (e.g. `"artificial intelligence"`, `"climate change"`, `"cryptocurrency"`).
-
-Posts that match at least one keyword are forwarded with a `topic_tags` list attached. Posts that match nothing are dropped. This keeps downstream workers focused on relevant content and reduces storage volume.
+The filter uses **TF-IDF** (Term Frequency-Inverse Document Frequency) rather than keyword matching. The vectorizer is fitted on 20 rich topic descriptions. Each incoming post is vectorized and its cosine similarity to the nearest topic is computed. Posts with similarity ≥ 0.07 are kept and tagged; posts below the threshold are dropped.
 
 ```
-"Amazon workers under pressure to up their AI usage..."
-                         ↓  matches "ai", "amazon"
-topic_tags = ["ai", "amazon"]  →  published to posts.filtered
+vectorizer = TfidfVectorizer(max_features=5000)
+vectorizer.fit([topic_description_1, topic_description_2, ...])
+
+post_vec   = vectorizer.transform([post_title + " " + post_body])
+topic_vecs = vectorizer.transform(topic_descriptions)
+scores     = cosine_similarity(post_vec, topic_vecs)    # shape: (1, 20)
+best_topic = topic_names[argmax(scores)]
+if scores.max() >= 0.07: keep(post, tag=best_topic)
 ```
+
+This filters ~339 raw posts down to ~229 on-topic posts per daily run.
 
 ---
 
 ### Step 3 — Enrichment
 
-**Service:** `workers/enrichment_worker/main.py` + `enricher.py`  
+**Service:** `workers/enrichment_worker/main.py` (full stack) · `demo.py:enrich_posts()` (demo)  
 **Consumes:** `posts.filtered`  
 **Produces:** `posts.enriched`  
-**Persists:** `posts` + `enriched_posts` tables in PostgreSQL
+**Persists:** `posts` + `enriched_posts` tables
 
-Each filtered post is run through the enrichment pipeline which adds four fields:
+Each filtered post is run through the enrichment pipeline:
 
 | Field | Method | Description |
 |---|---|---|
-| `sentiment` | Lexicon-based (see below) | `positive` / `neutral` / `negative` |
+| `sentiment` | Lexicon-based | `positive` / `neutral` / `negative` |
 | `sentiment_score` | Lexicon-based | Float from −1.0 to 1.0 |
-| `category` | Keyword lookup | Topic category label |
+| `time_decay_score` | `raw_score / (age_hours + 2)^1.5` | Freshness-weighted rank |
 | `entities` | Regex heuristic | Capitalized proper nouns |
-| `summary` | First-sentence extraction | Short post digest |
 
-The enriched post is then upserted into PostgreSQL (`ON CONFLICT DO NOTHING` on `platform + external_id`) and forwarded to `posts.enriched`.
-
-The enricher is designed as a **swap point**: the body of `enricher.py:enrich()` can be replaced with real API calls (Claude, OpenAI) without touching anything else in the pipeline.
+The enricher is designed as a **swap point**: the body of `enrich()` can be replaced with real LLM calls without touching anything else in the pipeline.
 
 ---
 
-### Step 4 — Daily Summarization
+### Step 4 — Deduplication & Clustering
 
-**Service:** `workers/summary_worker/main.py`  
+**Service:** `demo.py:deduplicate()` (demo)
+
+Cross-platform deduplication uses TF-IDF cosine similarity to cluster posts that cover the same story:
+
+```python
+vecs = TfidfVectorizer(max_features=10000).fit_transform(titles)
+sim  = cosine_similarity(vecs)                    # (n_posts × n_posts)
+pairs = argwhere(sim > 0.55)                      # threshold
+# union-find: merge posts into clusters → keep highest-scored per cluster
+```
+
+Posts within a cluster get `cross_platform=True` if they come from ≥2 sources. The ~229 filtered posts typically reduce to ~224 unique story clusters.
+
+---
+
+### Step 5 — Daily Summarization
+
+**Service:** `workers/summary_worker/main.py` (full stack) · `demo.py:build_summaries()` (demo)  
 **Consumes:** `posts.enriched`  
-**Persists:** `daily_summaries` table in PostgreSQL
+**Persists:** `daily_summaries` table  
+**AI:** AWS Bedrock → Amazon Nova Micro LLM
 
-The summary worker maintains an in-memory buffer of `{date → {topic → [posts]}}`. At midnight UTC it flushes each topic group:
+The summary worker groups posts by topic and, once per day, sends each group to an **LLM** (Amazon Nova Micro via AWS Bedrock):
 
 1. Computes sentiment breakdown (% positive / neutral / negative)
 2. Extracts trending words (top-N after stop-word removal)
-3. Calls **Claude Haiku** to write a human-readable 2–3 sentence briefing
+3. Calls the LLM to write a human-readable 2–3 sentence briefing
 4. Upserts a `daily_summaries` row
 
-The worker also listens for `SIGUSR1` so a summary can be forced at any time during development.
+The LLM call uses **no API key** — authentication is handled by an IAM role attached to the EC2 instance.
 
 ---
 
-### Step 5 — API & Dashboard
+### Step 6 — API & Dashboard
 
-**Service:** `api/main.py` + `api/schema.py`  
-**Endpoint:** `http://localhost:8000/graphql`  
-**Dashboard:** `http://localhost:8000`
+**Service:** `api/main.py` (full stack) · `demo.py` (demo)  
+**Endpoint:** `/graphql`  
+**Dashboard:** `/`
 
-A FastAPI application that mounts a Strawberry GraphQL router. All queries resolve against PostgreSQL. A separate background task consumes `posts.enriched` and fans out every new post to all connected WebSocket clients (`/ws/live`), enabling a real-time feed in the browser.
+A **FastAPI** application that mounts a Strawberry GraphQL router and several REST endpoints. Additional endpoints:
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/graphql` | GET/POST | GraphQL + GraphiQL IDE |
+| `/ws/live` | WS | Real-time post stream |
+| `/spikes` | GET | Topics with unusual post volume today |
+| `/history/{topic}` | GET | 30-day historical counts + sentiment |
+| `/search` | GET | RAG semantic search via LLM |
+| `/entities` | GET | Co-occurrence graph for D3.js |
+| `/profile` | GET | Personalized topic affinity scores |
+| `/collect/now` | POST | Manual collection trigger |
+| `/health` | GET | Service health check |
 
 ---
 
@@ -135,16 +183,16 @@ A FastAPI application that mounts a Strawberry GraphQL router. All queries resol
 
 ```mermaid
 flowchart TD
-    subgraph Sources["Data Sources"]
-        HN["HackerNews\n(Firebase REST API)"]
-        RD["Reddit\n(asyncpraw)"]
-        RSS["RSS Feeds\n(feedparser)"]
-        MS["Mastodon\n(Mastodon.py)"]
+    subgraph Sources["Data Sources (13)"]
+        HN["HackerNews · Lobste.rs · Dev.to"]
+        RSS["RSS Feeds (BBC, Reuters, NPR...)"]
+        API["arXiv · GDELT · SEC · FedReg"]
+        SK["Bluesky · Lemmy"]
     end
 
-    subgraph Collector["Collector Service — FastAPI :8001"]
-        C1["Parallel fetch\nevery 15 min"]
-        C2["Normalize → RawPost\n(Pydantic model)"]
+    subgraph Collector["Collector — FastAPI :8001"]
+        C1["Parallel fetch at 07:15 UTC\n(APScheduler CronTrigger)"]
+        C2["Normalize → RawPost (Pydantic)"]
         C3["Publish to Kafka"]
     end
 
@@ -154,72 +202,174 @@ flowchart TD
         K3[/"posts.enriched"/]
     end
 
-    subgraph FW["Filter Worker"]
-        F1["Keyword scan\ntitle + body"]
-        F2["Attach topic_tags\nDrop non-matching"]
+    subgraph FW["Filter Worker (TF-IDF)"]
+        F1["Semantic similarity\nto topic descriptions"]
+        F2["threshold ≥ 0.07 → keep\nAttach topic_tags"]
     end
 
     subgraph EW["Enrichment Worker"]
-        E1["Lexicon sentiment\n± score"]
-        E2["Entity extraction\n(regex heuristic)"]
-        E3["First-sentence\nsummary"]
-        E4[("PostgreSQL\nposts +\nenriched_posts")]
+        E1["Lexicon sentiment ± score"]
+        E2["Time-decay rank"]
+        E3["Entity extraction (regex)"]
+        E4[("PostgreSQL\nposts + enriched_posts")]
     end
 
     subgraph SW["Summary Worker"]
-        S1["Buffer posts\nby date + topic"]
-        S2["Claude Haiku API\n(GenAI / LLM)"]
-        S3[("PostgreSQL\ndaily_summaries")]
+        S1["Group by date + topic"]
+        S2["LLM: Amazon Nova Micro\n(AWS Bedrock — IAM role)"]
+        S3[("PostgreSQL / SQLite\ndaily_summaries")]
     end
 
-    subgraph API["API Service — FastAPI :8000"]
-        G1["GraphQL\n(Strawberry)"]
-        G2["WebSocket\n/ws/live"]
+    subgraph API["API — FastAPI :8000"]
+        G1["GraphQL (Strawberry)\nlifespan → APScheduler"]
+        G2["WebSocket /ws/live"]
+        G3["REST: /spikes /history\n/search /entities /profile"]
     end
 
     subgraph UI["Browser Dashboard"]
-        D1["Stat cards\nTopic chart"]
-        D2["Daily summaries\n(Claude text)"]
-        D3["Posts feed\n(filterable)"]
-        D4["Live ticker\n(WebSocket)"]
+        D1["Overview: stat cards + topic chart"]
+        D2["LLM daily summaries"]
+        D3["Historical trend charts (Chart.js)"]
+        D4["Entity graph (D3.js force-directed)"]
+        D5["RAG semantic search"]
     end
 
-    HN & RD & RSS & MS --> C1
+    HN & RSS & API & SK --> C1
     C1 --> C2 --> C3 --> K1
-
     K1 --> F1 --> F2 --> K2
-
-    K2 --> E1 --> E2 --> E3
-    E3 --> E4
-    E3 --> K3
-
+    K2 --> E1 --> E2 --> E3 --> E4 --> K3
     K3 --> S1 --> S2 --> S3
-
-    E4 --> G1
-    S3 --> G1
+    S3 & E4 --> G1
     K3 --> G2
-
-    G1 --> D1 & D2 & D3
-    G2 --> D4
+    G1 & G2 & G3 --> D1 & D2 & D3 & D4 & D5
 ```
 
 ---
 
-## Technologies
+## FastAPI — the Core Framework
 
-### FastAPI
+FastAPI is used as the **primary web framework** in every service that exposes HTTP or WebSocket interfaces. This section explains precisely where and how it is applied, making it the single most important library in the codebase.
 
-**Used in:** `collector/` and `api/`
+### Where FastAPI appears
 
-FastAPI is an async Python web framework built on ASGI (Starlette + Pydantic). It was chosen here for three reasons:
+| File | Role |
+|---|---|
+| `demo.py` | Single-process demo — runs the full pipeline AND serves the API |
+| `collector/main.py` | Standalone collection service with REST triggers |
+| `api/main.py` | GraphQL + WebSocket gateway in the full stack |
 
-1. **Native async** — all I/O (Kafka, HTTP calls to external APIs, PostgreSQL) runs on the same event loop without blocking threads.
-2. **Automatic validation** — Pydantic models are used as request/response schemas; FastAPI rejects malformed input before it ever reaches business logic.
-3. **Lifespan events** — the `@asynccontextmanager lifespan` hook starts background tasks (periodic collection, Kafka consumers) cleanly when the server boots and shuts them down gracefully.
+### How FastAPI is used in `demo.py` (the deployed version)
 
-The collector exposes a REST API for manual triggering. The API service mounts a GraphQL router alongside a WebSocket endpoint on the same FastAPI app.
+The demo collapses everything into one FastAPI app. Here is the full lifecycle:
+
+**1. Lifespan context manager — startup orchestration**
+
+```python
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    await demo_db.init_db()          # create SQLite tables if missing
+    await run_collection()           # load from cache or fetch fresh data
+    _scheduler.add_job(              # register daily job
+        run_collection,
+        CronTrigger(hour=7, minute=15)
+    )
+    _scheduler.start()
+    yield                            # app now running
+    _scheduler.shutdown()
+```
+
+FastAPI's `lifespan` replaces deprecated `@app.on_event("startup")`. The async context manager guarantees that the scheduler is always stopped on shutdown — even if the app crashes — preventing zombie background tasks.
+
+**2. GraphQL router mounted on the same app**
+
+```python
+schema = strawberry.Schema(query=Query, subscription=Subscription)
+graphql_app = GraphQLRouter(schema, graphql_ide="graphiql")
+app.include_router(graphql_app, prefix="/graphql")
+```
+
+Strawberry's `GraphQLRouter` is a standard FastAPI router. It plugs in alongside REST endpoints on the same ASGI app, same event loop. No separate server or port needed.
+
+**3. REST endpoints alongside GraphQL**
+
+FastAPI decorators handle JSON REST endpoints on the same app:
+
+```python
+@app.get("/health")
+def health(): ...
+
+@app.get("/spikes")
+def spikes(): ...
+
+@app.get("/history/{topic}")
+def history(topic: str, days: int = 30): ...
+
+@app.get("/search")
+async def search(q: str = FQuery(...)): ...
+
+@app.post("/collect/now")
+async def trigger_collection():
+    asyncio.create_task(run_collection())   # fire-and-forget background task
+    return {"status": "collection started"}
+```
+
+Pydantic handles query parameter validation automatically — `days: int = 30` rejects non-integers before the handler runs.
+
+**4. WebSocket live stream**
+
+```python
+@app.websocket("/ws/live")
+async def ws_live(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            await asyncio.sleep(30)
+            await websocket.send_json({"heartbeat": True})
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+```
+
+FastAPI's native WebSocket support runs on the same Uvicorn event loop as all HTTP handlers — no separate WebSocket server.
+
+**5. Static files and HTML response**
+
+```python
+app.mount("/static", StaticFiles(directory="frontend"), name="static")
+
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    html = Path("frontend/index.html").read_text()
+    html = html.replace("__BASE_URL__", BASE_URL)   # inject subpath
+    return HTMLResponse(html)
+```
+
+`BASE_URL` is injected server-side so that the frontend correctly prefixes all API calls when deployed at `/social-pulse/` rather than `/`.
+
+**6. ASGI server (Uvicorn)**
+
+```python
+if __name__ == "__main__":
+    uvicorn.run("demo:app", host="0.0.0.0", port=8000, reload=False)
+```
+
+Uvicorn is the ASGI server that FastAPI runs on. It handles HTTP/1.1, HTTP/2, and WebSocket protocol upgrades. In production it is managed by `systemd` with `Restart=always`.
+
+### Why FastAPI over Flask or Django
+
+| Feature | FastAPI | Flask | Django |
+|---|---|---|---|
+| Native async / await | ✅ ASGI | ⚠️ requires eventlet/gevent | ⚠️ ASGI add-on |
+| Pydantic validation built-in | ✅ | ❌ | ❌ |
+| WebSocket support | ✅ native | ❌ | ❌ |
+| Lifespan events | ✅ | ⚠️ signals | ⚠️ AppConfig.ready() |
+| Auto OpenAPI docs | ✅ `/docs` | ❌ | ❌ |
+| GraphQL router plug-in | ✅ `include_router` | ⚠️ blueprint hack | ⚠️ custom view |
+
+For an I/O-heavy pipeline (parallel HTTP fetches to 13 APIs, concurrent Kafka consumers, async SQLite) FastAPI's native async is essential. All fetches, DB writes, and WebSocket broadcasts share one event loop without thread overhead.
 
 ---
+
+## Technologies
 
 ### Apache Kafka
 
@@ -250,32 +400,13 @@ Kafka is a distributed, persistent, ordered event log. In this project it acts a
 **Used in:** `api/schema.py` via Strawberry  
 **Library:** `strawberry-graphql`
 
-GraphQL is a query language for APIs where the client declares exactly which fields it needs. Unlike REST (where each endpoint returns a fixed shape), GraphQL lets the dashboard request only the data it will render.
+GraphQL is a query language for APIs where the client declares exactly which fields it needs. Unlike REST, GraphQL lets the dashboard request only the data it will render.
 
 **Why GraphQL instead of REST for the API layer?**
 
 - **Single endpoint, flexible shape** — the dashboard can ask for `topicStats`, `posts`, and `dailySummary` in one round trip, each with only the fields it needs.
 - **Nested data** — the `dailySummary` query returns a `sentiment` object with sub-fields; this nests naturally in GraphQL and would require multiple REST endpoints or a custom envelope.
 - **Self-documenting** — the GraphiQL IDE (at `/graphql`) is generated automatically from the schema with no extra work.
-
-Example query that the dashboard issues on load:
-
-```graphql
-{
-  topicStats {
-    topic
-    postCount
-    positivePct
-    neutralPct
-    negativePct
-  }
-  dailySummary(topic: "ai") {
-    summaryText
-    trendingWords
-    sentiment { positive neutral negative }
-  }
-}
-```
 
 ---
 
@@ -285,48 +416,59 @@ Example query that the dashboard issues on load:
 
 | Library | Version | Purpose |
 |---|---|---|
-| `aiohttp` | 3.9.5 | Async HTTP client used to call the HackerNews Firebase API and any custom HTTP sources. Non-blocking — hundreds of item fetches run concurrently on one event loop. |
-| `asyncpraw` | 7.7.1 | Async wrapper around the Reddit API (PRAW). Authenticates with Reddit's OAuth2 client-credentials flow and streams hot posts from configured subreddits. |
-| `feedparser` | 6.0.11 | Parses RSS and Atom feeds from any URL. Handles dozens of feed format variations and date formats automatically. Used for news site RSS sources. |
-| `Mastodon.py` | 1.8.1 | Python client for the Mastodon ActivityPub API. Reads the public timeline of any configured instance. Mastodon is the closest openly accessible Twitter-like source. |
-| `httpx` | 0.27.0 | Sync/async HTTP client; included as a dependency of several libraries. |
+| `aiohttp` | 3.9.5 | Async HTTP client for HackerNews, GDELT, SEC EDGAR, Federal Register, Lemmy, arXiv, and RSS downloads. All requests run concurrently on one event loop. |
+| `feedparser` | 6.0.11 | Parses RSS and Atom feeds. Handles dozens of format variants and date formats automatically. Used for 9 RSS sources. |
+| `atproto` | latest | Async Bluesky client. Authenticates with app password and calls `searchPosts`. |
+| `httpx` | 0.27.0 | Sync/async HTTP client; dependency of several libraries. |
 
 ### Streaming & Messaging
 
 | Library | Version | Purpose |
 |---|---|---|
-| `aiokafka` | 0.10.0 | Async Kafka producer and consumer client. Used in every service — the collector publishes, the workers consume and produce. All operations are `await`-able and run without blocking threads. |
+| `aiokafka` | 0.10.0 | Async Kafka producer and consumer. All operations are `await`-able — the collector publishes, the workers consume and produce, without blocking threads. |
+
+### Scheduling
+
+| Library | Version | Purpose |
+|---|---|---|
+| `apscheduler` | 3.x | Async-native job scheduler. Runs `run_collection()` at **07:15 UTC daily** via `CronTrigger(hour=7, minute=15)`. Started inside the FastAPI `lifespan` context so it shares the app event loop. |
 
 ### API & Validation
 
 | Library | Version | Purpose |
 |---|---|---|
-| `fastapi` | 0.111.0 | Async web framework for the collector REST API and the GraphQL/WebSocket API service. |
-| `uvicorn` | 0.29.0 | ASGI server that runs FastAPI. Handles HTTP/1.1, HTTP/2, and WebSockets. |
-| `strawberry-graphql` | 0.227.0 | Code-first GraphQL library for Python. Schema is defined in pure Python using `@strawberry.type` dataclasses; no `.graphql` schema files needed. |
-| `pydantic` | 2.7.1 | Data validation and serialization. Every post moving through the pipeline is a Pydantic model — invalid data raises a clear error at the boundary. |
-| `pydantic-settings` | 2.2.1 | Reads configuration from environment variables or `.env` files into typed Pydantic models. |
+| `fastapi` | 0.111.0 | Async web framework — serves GraphQL, REST, WebSocket, and static files in one process. See [FastAPI section](#fastapi--the-core-framework). |
+| `uvicorn` | 0.29.0 | ASGI server that runs FastAPI. Handles HTTP/1.1, HTTP/2, and WebSocket upgrades. Managed by systemd in production. |
+| `strawberry-graphql` | 0.227.0 | Code-first GraphQL library. Schema is defined with `@strawberry.type` dataclasses; no `.graphql` files needed. |
+| `pydantic` | 2.7.1 | Data validation. Every post moving through the pipeline is a Pydantic model — invalid data raises a clear error at the boundary. |
+
+### Machine Learning
+
+| Library | Version | Purpose |
+|---|---|---|
+| `scikit-learn` | 1.4.x | TF-IDF vectorizer for semantic topic filtering and cross-platform deduplication. `TfidfVectorizer` + `cosine_similarity` replace keyword matching with semantic similarity. |
+| `numpy` | 1.26.x | Array operations for time-decay ranking, spike detection (rolling mean), and similarity matrix math. |
 
 ### Storage
 
 | Library | Version | Purpose |
 |---|---|---|
-| `asyncpg` | 0.29.0 | High-performance async PostgreSQL driver. Directly executes parameterized SQL — used in the enrichment worker (upserts) and the API (queries). |
-| `sqlalchemy` | 2.0.30 | ORM / query builder. Included as a dependency; the project uses raw SQL via asyncpg for simplicity but SQLAlchemy is available for model-based queries. |
-| `redis` | 5.0.4 | Async Redis client. Wired into the API service for future response caching. |
+| `aiosqlite` | 0.20.0 | Async SQLite driver. Used in the demo for posts, summaries, and 30-day historical data — no PostgreSQL setup required. |
+| `asyncpg` | 0.29.0 | High-performance async PostgreSQL driver for the full stack. |
 
 ### AI
 
 | Library | Version | Purpose |
 |---|---|---|
-| `anthropic` | 0.101.0 | Official Python SDK for the Claude API (Anthropic). Used in the summary worker to call Claude Haiku and generate daily briefings. See [AI & Machine Learning](#ai--machine-learning). |
+| `boto3` | 1.34.46 | AWS SDK. Used to call Amazon Nova Micro on AWS Bedrock via `bedrock-runtime.invoke_model()`. Credentials come from the EC2 IAM role — no API key in code or environment. |
 
 ### Frontend (CDN, no install)
 
 | Library | Source | Purpose |
 |---|---|---|
-| Chart.js 4 | CDN | Renders the stacked bar chart of topic sentiment breakdown. |
-| Tailwind CSS | CDN | Utility-first CSS framework for the dashboard layout and dark theme. |
+| Chart.js 4 | CDN | Line charts for historical trends; stacked bar for sentiment breakdown. |
+| D3.js 7 | CDN | Force-directed graph for the entity co-occurrence visualization. |
+| Tailwind CSS | CDN | Utility-first CSS for the dashboard layout and dark theme. |
 
 ---
 
@@ -336,98 +478,184 @@ Example query that the dashboard issues on load:
 
 This project uses AI at **one specific step**: the daily summarization stage. All other enrichment (sentiment, entities, per-post summaries) uses deterministic, rule-based code — by design, so you can see clearly where AI adds value and where it doesn't.
 
+There are also two ML models (TF-IDF vectorizers) used for filtering and deduplication — these are traditional machine learning, not LLMs, and run entirely offline with no API calls.
+
+---
+
+### TF-IDF Semantic Filtering (ML, not LLM)
+
+**File:** `demo.py:semantic_filter()`
+
+`TfidfVectorizer` from scikit-learn converts text into weighted term vectors. The vectorizer is fitted on the 20 topic descriptions (not on posts) so it "understands" the vocabulary of each topic. Posts are filtered by cosine similarity:
+
+```python
+threshold = 0.07    # empirically tuned — lower catches more, higher is stricter
+```
+
+This is unsupervised machine learning: no labeled data, no training loop, no GPU. It runs in milliseconds on CPU.
+
+---
+
+### TF-IDF Deduplication (ML, not LLM)
+
+**File:** `demo.py:deduplicate()`
+
+A second TF-IDF vectorizer (max 10,000 features) computes pairwise cosine similarity across all post titles. Pairs above 0.55 threshold are merged into clusters using a union-find algorithm. The highest-scored post from each cluster is kept as the canonical story.
+
 ---
 
 ### Rule-Based Enrichment (not ML)
 
 **File:** `workers/enrichment_worker/enricher.py`
 
-The per-post enrichment uses no machine learning model. It works through:
+Per-post enrichment uses no machine learning model:
 
-- **Sentiment:** Lexicon matching against two hard-coded word sets (`_POSITIVE`, `_NEGATIVE`). Score = `(positive_hits - negative_hits) / total_hits`. This is the simplest possible approach — fast, free, deterministic, and requires no model loading or API calls.
-- **Entities:** Regex for capitalized words (`[A-Z][a-z]{2,}`). A stand-in for Named Entity Recognition (NER). In a production system this would be replaced with a model like spaCy's `en_core_web_sm`.
-- **Summary:** First sentence extraction. Splits on sentence-ending punctuation and returns the first 200 characters.
-
-This is intentional: the enricher is a clearly marked swap point. The docstring says `"Swap the body of enrich() with real API calls when ready."` Swapping it with a Claude or OpenAI call per post would produce richer results at a cost of ~$0.70–$3/day depending on model.
+- **Sentiment:** Lexicon matching against two hard-coded word sets (`_POSITIVE`, `_NEGATIVE`). Score = `(positive_hits - negative_hits) / total_hits`. Fast, free, deterministic.
+- **Entities:** Regex for capitalized words (`[A-Z][a-z]{2,}`). A stand-in for Named Entity Recognition (NER). In production this would be replaced with spaCy's `en_core_web_sm`.
 
 ---
 
 ### Generative AI — Large Language Model (LLM)
 
 **Technology:** Generative AI / LLM  
-**Model:** `claude-haiku-4-5-20251001` (Anthropic)  
-**File:** `workers/summary_worker/main.py`  
-**SDK:** `anthropic` Python library
+**Model:** Amazon Nova Micro (`eu.amazon.nova-micro-v1:0`)  
+**Provider:** AWS Bedrock (cross-region inference profile, eu-west-1)  
+**File:** `bedrock_client.py`, called from `demo.py:_ai_summary()` and `demo_rag.py:rag_answer()`  
+**SDK:** `boto3` — credentials via EC2 IAM role, no API key needed
 
 #### What is a Large Language Model?
 
-A Large Language Model (LLM) is a deep learning model — typically a Transformer architecture — trained on vast amounts of text to predict the next token in a sequence. Modern LLMs like Claude, GPT-4, or Gemini can follow instructions, summarize documents, answer questions, write code, and generate coherent prose. They are the foundation of the **Generative AI** (GenAI) category: AI that generates new content rather than classifying or predicting a fixed label.
+A Large Language Model (LLM) is a deep learning model — typically a Transformer architecture — trained on vast amounts of text to predict the next token in a sequence. Modern LLMs can follow instructions, summarize documents, answer questions, write code, and generate coherent prose. They are the foundation of the **Generative AI** (GenAI) category: AI that generates new content rather than classifying or predicting a fixed label.
 
-LLMs are not trained or fine-tuned in this project. They are called as a **hosted API service** — the model weights live on Anthropic's infrastructure and are accessed via HTTP.
+LLMs are not trained or fine-tuned in this project. They are called as a **hosted API service** — the model weights live on AWS infrastructure and are accessed via HTTP through the Bedrock runtime API.
 
 #### How it is used here
 
-Once per day per topic (or on flush), the summary worker sends a prompt to Claude containing:
+**1 — Daily topic briefings** (once per day, 20 topics)
+
+The summary builder sends a prompt containing the top-scored post titles, their sentiments, and the aggregate sentiment breakdown:
 
 ```
 System: "You are a social media analyst writing concise daily briefings.
          Be factual, neutral, and highlight the most significant stories.
-         Write 2–3 sentences maximum."
+         Write 2-3 sentences maximum."
 
-User:   "Write a daily briefing for the topic 'ai' based on these 12 posts
-         from today (15% positive, 80% neutral, 5% negative):
+User:   "Write a daily briefing for the topic 'silicon valley' based on these
+         18 posts from today (39% positive, 61% neutral, 0% negative):
 
-         - RTX 5090 and M4 MacBook Air: Can It Game? (score: 671, sentiment: neutral)
-         - Amazon workers pressured to increase AI usage are fabricating tasks (score: 208, ...)
-         - Show HN: Watch a neural net learn to play Snake (score: 16, ...)"
+         - Nectar Social raises $30M Series A (score: 412, sentiment: positive)
+         - Cerebras IPO delayed amid regulatory review (score: 287, sentiment: neutral)
+         ..."
 ```
 
-Claude returns a prose paragraph like:
+The LLM returns a prose paragraph like:
 
-> *Top story: RTX 5090 and M4 MacBook Air gaming performance testing dominated engagement (671 points), while OpenAI's integration of ChatGPT with bank accounts via Plaid raises new questions about AI financial access. A concerning report emerged that Amazon workers pressured to increase AI usage are fabricating tasks to meet quotas, highlighting adoption challenges in enterprise environments.*
+> *Silicon Valley today focuses on the AI boom and new funding rounds: Nectar Social raises $30M and Cerebras' past struggles, while optimism around AI-driven innovations and new energy solutions highlights the region's tech-driven evolution.*
 
-#### Why Claude Haiku specifically?
+**2 — RAG semantic search** (on user query)
+
+**File:** `demo_rag.py`
+
+Retrieval-Augmented Generation (RAG) combines TF-IDF retrieval with LLM synthesis:
+
+1. A TF-IDF vectorizer (max 15,000 features) indexes all posts
+2. On a user query, the top-5 most similar posts are retrieved
+3. Those posts are passed to the LLM with the query as context
+4. The LLM synthesizes a grounded answer from the retrieved evidence
+
+```python
+# Retrieval
+query_vec = vectorizer.transform([query])
+scores    = cosine_similarity(query_vec, post_vecs)
+top_k     = argsort(scores[0])[-5:][::-1]
+context   = [posts[i] for i in top_k]
+
+# Generation (LLM)
+bedrock_client.invoke(system=RAG_SYSTEM, user=f"{query}\n\n{context}")
+```
+
+#### Why Amazon Nova Micro specifically?
 
 | Consideration | Choice |
 |---|---|
-| **Task complexity** | Summarizing 10–20 short titles requires moderate reasoning — Haiku handles this well. |
-| **Cost** | Haiku is the fastest and cheapest Claude model: ~$0.80/MTok input, $4/MTok output. With 9 topics/day this costs under $0.01/day. |
-| **Latency** | Summaries are generated at midnight (batch), not in real time, so speed is not critical. |
-| **Quality** | The structured prompt (system role + explicit format constraint "2–3 sentences") gives consistent, well-formed output across all topics. |
+| **Availability** | No use-case approval form — available immediately in any AWS account |
+| **Cost** | $0.035/1M input tokens, $0.14/1M output tokens — ~28× cheaper than Claude Haiku |
+| **Auth** | EC2 IAM role — zero secrets in code or environment variables |
+| **Task fit** | Summarizing 10–20 short titles needs only moderate reasoning — Nova Micro handles this well |
+| **Latency** | Summaries are batch-generated once per day — speed is not critical |
 
-#### Configuration / Parameters
+#### LLM API request format (Amazon Nova / Bedrock)
 
 ```python
-client.messages.create(
-    model   = "claude-haiku-4-5-20251001",  # model version
-    max_tokens = 300,                        # hard cap on output length
-    system  = "...",                         # role + style instructions
-    messages = [{"role": "user", "content": "..."}]
+body = json.dumps({
+    "messages": [{"role": "user", "content": [{"text": user_prompt}]}],
+    "system":   [{"text": system_prompt}],
+    "inferenceConfig": {"maxTokens": 300},
+})
+response = boto3.client("bedrock-runtime").invoke_model(
+    modelId="eu.amazon.nova-micro-v1:0",
+    body=body,
+    contentType="application/json",
+    accept="application/json",
 )
+text = json.loads(response["body"].read())["output"]["message"]["content"][0]["text"]
 ```
 
-- **`max_tokens=300`** caps the output at roughly 3–4 sentences, preventing verbose responses.
+- **`maxTokens=300`** caps the output at roughly 3–4 sentences.
 - **`system` prompt** constrains the persona and format, making outputs consistent across topics and days.
-- **No `temperature` set** — defaults to Anthropic's recommended value (~1.0 for Claude). For factual summarization a lower temperature (0.3–0.5) would make outputs more conservative; left at default here to allow natural prose variation.
+- **`eu.` prefix** routes the request through the EU cross-region inference profile (Ireland + Frankfurt + Paris), keeping data within the EU.
 
 #### AI Technologies NOT used in this project
 
-The following AI technologies are referenced for context but are not part of this project:
-
 - **Speech-to-text** — no audio input; all sources are text.
 - **Image diffusion / image classification** — no image processing.
-- **Chatbots** — the GraphQL API has no conversational interface.
-- **Retrieval-Augmented Generation (RAG)** — posts are queried via SQL, not a vector store. RAG would be a natural next step: embed posts with a model like `text-embedding-3-small`, store in pgvector, and let users ask semantic questions like *"show me discussions similar to yesterday's AI regulation debate"*.
-- **Agentic AI** — Claude is called once per topic per day in a single-turn, single-tool pattern. An agentic approach would let the model decide which topics to summarize, call the GraphQL API itself, and iteratively refine its output.
+- **Fine-tuning** — the LLM is called as a hosted API; no model weights are modified.
+- **Agentic AI** — the LLM is called once per topic per day in a single-turn pattern. An agentic approach would let the model decide which topics to summarize and call APIs itself.
 
 ---
 
 ## Database Schema
 
+### Demo (SQLite via `demo_db.py`)
+
+```sql
+posts (
+    id           TEXT PRIMARY KEY,   -- platform:external_id
+    platform     TEXT,
+    external_id  TEXT,
+    author       TEXT,
+    title        TEXT,
+    body         TEXT,
+    url          TEXT,
+    raw_score    INTEGER,
+    topic_tag    TEXT,
+    sentiment    TEXT,               -- positive / neutral / negative
+    timestamp    TEXT,               -- ISO-8601
+    collected_at TEXT,               -- UTC date when collected
+    time_decay_score REAL,
+    cross_platform   INTEGER         -- 1 if seen on ≥2 platforms
+)
+
+daily_summaries (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    summary_date  TEXT,              -- YYYY-MM-DD
+    topic         TEXT,
+    summary_text  TEXT,              -- LLM-generated briefing
+    post_count    INTEGER,
+    positive_pct  REAL,
+    neutral_pct   REAL,
+    negative_pct  REAL,
+    trending_words TEXT,             -- JSON array
+    UNIQUE (summary_date, topic)
+)
+```
+
+### Full stack (PostgreSQL)
+
 ```sql
 posts              -- one row per collected post (deduplicated by platform + external_id)
 enriched_posts     -- one-to-one extension: sentiment, entities, summary
-daily_summaries    -- one row per (date, topic), contains Claude-generated text
+daily_summaries    -- one row per (date, topic), contains LLM-generated text
 ```
 
 ---
@@ -442,16 +670,14 @@ This project is intentionally deployed as a **single-process demo** (`demo.py`) 
 
 ### What the demo does vs what the full stack adds
 
-The demo collapses all pipeline stages into a single Python process with SQLite for persistence. The full stack separates each stage into an independent service connected by Kafka.
-
 ```
 Demo (demo.py — one process)                Full stack (docker compose — 10 services)
 ─────────────────────────────────────────   ─────────────────────────────────────────
 fetch → filter → enrich → summarize         Collector → Kafka → Filter Worker
         (all function calls)                         → Enrichment Worker → PostgreSQL
 SQLite for persistence                               → Ranking Worker
-APScheduler for daily job at 07:15 UTC               → Summary Worker → PostgreSQL
-                                            API service reads from PostgreSQL
+APScheduler CronTrigger at 07:15 UTC                 → Summary Worker → PostgreSQL
+FastAPI serves everything on :8000          API service reads from PostgreSQL
                                             WebSocket reads live from Kafka
 ```
 
@@ -462,8 +688,8 @@ APScheduler for daily job at 07:15 UTC               → Summary Worker → Post
 | Time-decay ranking | ✅ | ✅ |
 | Sentiment + entity enrichment | ✅ | ✅ |
 | Deduplication + cross-platform clustering | ✅ | ✅ |
-| AI daily summaries (Claude Haiku) | ✅ | ✅ |
-| GraphQL API + dashboard | ✅ | ✅ |
+| LLM daily summaries (Nova Micro / Bedrock) | ✅ | ✅ |
+| GraphQL API + dashboard | ✅ FastAPI | ✅ FastAPI |
 | RAG search | ✅ | ✅ |
 | Entity co-occurrence graph | ✅ | ✅ |
 | Historical trend charts | ✅ | ✅ |
@@ -480,8 +706,6 @@ APScheduler for daily job at 07:15 UTC               → Summary Worker → Post
 ---
 
 ### Resource consumption: demo vs full stack
-
-The most critical difference for deployment is **RAM**. The full stack requires running Kafka + ZooKeeper — two JVM processes that together consume over 750 MB just at idle, before any application code runs.
 
 **Demo (`demo.py`):**
 
@@ -512,52 +736,171 @@ The full stack requires **8× more RAM** than the demo. This is almost entirely 
 
 ---
 
-### Cost analysis (AWS EC2, eu-west-1 — Ireland)
+## Cost Analysis
 
-This project is hosted on an existing AWS EC2 instance at `54.78.82.101` (eu-west-1). The table below shows what instance type each deployment mode requires and what it costs.
+All costs are for the **AWS eu-west-1 (Ireland)** region where this project is deployed. Prices are as of 2025; AWS on-demand rates. The demo runs on a **t3.small** EC2 instance shared with a portfolio website.
 
-| EC2 type | RAM | vCPU | Demo fits? | Full stack fits? | On-demand price | Monthly cost |
-|---|---|---|---|---|---|---|
-| t3.micro | 1 GB | 2 | ✅ | ❌ | $0.0114/hr | ~$8 |
-| t3.small | 2 GB | 2 | ✅ | ❌ | $0.0228/hr | ~$17 |
-| **t3.medium** | **4 GB** | **2** | **✅** | **✅ (tight)** | **$0.0464/hr** | **~$34** |
-| t3.large | 8 GB | 2 | ✅ | ✅ (comfortable) | $0.0928/hr | ~$68 |
-| t3.xlarge | 16 GB | 4 | ✅ | ✅ (production) | $0.1856/hr | ~$136 |
+### Pipeline execution profile
 
-**Key finding:** switching from the demo to the full stack forces a minimum instance upgrade from t3.micro/small (where the existing site runs) to t3.medium — adding **$17–26/month** in EC2 cost alone, before accounting for additional EBS storage (Kafka needs 20 GB of log space on top of the OS disk).
-
----
-
-### Fitness for purpose analysis
-
-The three capabilities the full stack provides that the demo does not — horizontal scaling, service isolation, and live Kafka streaming — are each evaluated against the actual usage pattern of this deployment:
-
-**Horizontal scaling**
-> Kafka allows multiple enrichment workers to process posts in parallel by distributing topic partitions across consumers. This matters at high throughput — thousands of posts per minute.
->
-> *This deployment collects once per day and processes ~300 posts. A single process completes the full pipeline in under 60 seconds. Horizontal scaling provides zero practical benefit here.*
-
-**Service isolation**
-> In the full stack, a crashing enrichment worker does not affect the API or the collector. Each process is independent.
->
-> *With one scheduled collection per day and no SLA, a process crash means the next day's data is collected 24 hours later. The demo restarts via `systemd` in under 5 seconds. Isolation is not worth the infrastructure cost at this scale.*
-
-**Real-time WebSocket live stream**
-> In the full stack, every post flowing through `posts.enriched` is immediately pushed to connected browser clients, creating a genuine live ticker.
->
-> *In the demo the WebSocket endpoint exists but only receives posts during the 60-second collection window. Outside of that window it is idle. Given daily collection, a "live" ticker would update for 60 seconds per day. The educational value of the feature is demonstrated through the code; the operational value at daily cadence is negligible.*
+| Metric | Value |
+|---|---|
+| Collection runs per day | 1 (07:15 UTC) |
+| Raw posts fetched | ~339 |
+| Posts after semantic filter | ~229 |
+| Posts after deduplication | ~224 |
+| LLM summary calls per run | 20 (one per topic) |
+| Pipeline wall-clock time | ~60 seconds |
+| LLM input tokens per call | ~600 tokens (system + titles) |
+| LLM output tokens per call | ~150 tokens (2–3 sentence briefing) |
+| DB write volume per day | ~224 posts + 20 summaries |
 
 ---
 
-### Conclusion
+### AI Services — AWS Bedrock (Amazon Nova Micro)
 
-The demo version delivers **100% of the analytical features** (collection, filtering, enrichment, summaries, RAG, entity graph, historical charts, spike detection) at **~355 MB RAM** and **$0 additional infrastructure cost**, running on the existing server.
+**Model:** `eu.amazon.nova-micro-v1:0`  
+**Pricing:** $0.035 / 1M input tokens · $0.14 / 1M output tokens
 
-The full stack is provided in `docker-compose.yml`, `deploy/docker-compose.prod.yml`, and `k8s/` as a **complete educational reference** showing how each component would be deployed in a production environment with real traffic, multiple teams, and SLA requirements. The Kubernetes manifests in particular demonstrate concepts — StatefulSets, HPA, KEDA Kafka-lag scaling, Ingress TLS — that are standard in enterprise data platform engineering.
+#### Daily summaries
 
-The architectural decision principle illustrated here: **match infrastructure complexity to actual scale requirements**. Kafka and container orchestration are powerful tools that solve real problems at scale. Deploying them for a single daily batch job with one user is over-engineering — and understanding *why* is as valuable as knowing *how* to use them.
+| Item | Tokens/day | Rate | Cost/day |
+|---|---|---|---|
+| Input (20 topics × ~600 tokens) | 12,000 | $0.035/1M | $0.00042 |
+| Output (20 topics × ~150 tokens) | 3,000 | $0.14/1M | $0.00042 |
+| **Summaries subtotal** | | | **$0.00084/day** |
+
+#### RAG search (estimated 5 user queries/day)
+
+| Item | Tokens/query | Rate | Cost/day |
+|---|---|---|---|
+| Input (query + 5 retrieved posts) | ~800 | $0.035/1M | $0.00014 |
+| Output (~200 tokens answer) | ~200 | $0.14/1M | $0.00014 |
+| **RAG subtotal (5 queries)** | | | **$0.00028/day** |
+
+#### AI cost summary
+
+| Period | Summaries | RAG (5 q/day) | **Total** |
+|---|---|---|---|
+| Per day | $0.00084 | $0.00028 | **$0.0011** |
+| Per month | $0.025 | $0.008 | **$0.033** |
+| Per year | $0.31 | $0.10 | **$0.41** |
+
+**Comparison — if using Anthropic API (Claude Haiku 4.5):**
+
+| Model | Input price | Output price | Monthly AI cost | vs Nova Micro |
+|---|---|---|---|---|
+| Amazon Nova Micro (current) | $0.035/1M | $0.14/1M | $0.03 | — |
+| Claude Haiku 4.5 (Anthropic API) | $0.80/1M | $4.00/1M | $0.75 | 23× more expensive |
+| Claude Haiku 4.5 (Bedrock) | $1.00/1M | $5.00/1M | $0.93 | 28× more expensive |
+| Claude Sonnet 4.5 (Anthropic API) | $3.00/1M | $15.00/1M | $3.50 | 106× more expensive |
 
 ---
+
+### Compute — EC2 t3.small
+
+**Instance:** t3.small · 2 vCPU · 2 GB RAM · eu-west-1  
+**On-demand price:** $0.0228/hour
+
+| Period | Hours | Cost |
+|---|---|---|
+| Per day | 24 | $0.547 |
+| Per month | 730 | $16.64 |
+| Per year | 8,760 | **$199.73** |
+
+> The EC2 instance is shared with the `forwardforecasting.eu` portfolio site. The marginal cost attributable to Social Pulse is effectively $0 — the instance would run regardless.
+
+**Reserved instance savings (1-year, no upfront):**
+
+| Pricing model | Monthly | Annual | Savings |
+|---|---|---|---|
+| On-demand | $16.64 | $199.73 | — |
+| 1-yr reserved (no upfront) | ~$10.95 | ~$131.40 | 34% |
+| 3-yr reserved (no upfront) | ~$7.30 | ~$87.60 | 56% |
+
+**CPU utilization during pipeline:**
+
+| Phase | Duration | vCPU % | Credit consumption |
+|---|---|---|---|
+| Parallel HTTP fetch (13 sources) | ~50 s | ~30% | ~0.25 credits |
+| TF-IDF filtering + dedup | ~2 s | ~90% | ~0.03 credits |
+| LLM calls (20 × Nova Micro) | ~8 s | ~10% (I/O-bound) | ~0.01 credits |
+| Idle (23 h 59 min/day) | 86,340 s | <5% | +10 credits earned |
+
+T3 instances earn 24 CPU credits/day at idle on t3.small; the pipeline consumes <0.3 credits. The instance never exhausts burst capacity.
+
+---
+
+### Storage — EBS + SQLite
+
+**EBS volume:** 20 GB gp3 · $0.088/GB-month (eu-west-1)
+
+| Item | Size | Monthly | Annual |
+|---|---|---|---|
+| OS + Python env + code | ~14 GB | — | — |
+| SQLite DB (current) | 0.4 MB | — | — |
+| SQLite DB (1-year projection, ~224 posts/day) | ~150 MB | — | — |
+| **EBS total (20 GB)** | | **$1.76** | **$21.12** |
+
+SQLite growth rate: ~1.5 KB/post × 224 posts/day × 365 days ≈ 120 MB/year. The 20 GB volume is sufficient for many years of operation.
+
+---
+
+### Networking — Data Transfer
+
+**AWS pricing:** First 100 GB/month out to internet is free (EC2 free tier for eu-west-1).
+
+| Traffic type | Volume/month | Cost |
+|---|---|---|
+| Inbound (fetching from 13 APIs) | ~50 MB | $0.00 (inbound is free) |
+| Outbound (dashboard HTML + API responses) | ~500 MB | $0.00 (< 100 GB free tier) |
+| **Total data transfer** | | **$0.00/month** |
+
+At the current traffic level (portfolio project, occasional visitors) outbound stays well within the 100 GB free tier. Cost rises above $0 only if the site exceeds ~100 GB/month — equivalent to ~200,000 full page loads.
+
+---
+
+### Total Cost Summary
+
+| Component | Monthly | Annual |
+|---|---|---|
+| EC2 t3.small (on-demand) | $16.64 | $199.73 |
+| EBS storage (20 GB gp3) | $1.76 | $21.12 |
+| Data transfer | $0.00 | $0.00 |
+| AWS Bedrock AI (Nova Micro) | $0.03 | $0.41 |
+| **Total** | **$18.43** | **$221.26** |
+
+| Scenario | Monthly | Annual |
+|---|---|---|
+| Current (on-demand, shared instance) | $18.43 | $221.26 |
+| Current (1-yr reserved) | $12.74 | $152.85 |
+| Full stack upgrade (t3.medium on-demand) | $35.07 | $420.87 |
+| Full stack (t3.medium, 1-yr reserved) | $22.86 | $274.29 |
+
+**Key finding:** The LLM cost ($0.41/year) is negligible — less than 0.2% of total infrastructure spend. The dominant cost is EC2 compute, not AI.
+
+---
+
+### Execution Timeline (one daily run)
+
+```
+07:15:00 UTC  — APScheduler fires run_collection()
+07:15:00      — Check SQLite cache (no today's summaries → fresh fetch)
+07:15:00      — Launch 13 async fetch coroutines in parallel (aiohttp)
+07:15:50      — All fetches complete (~50s due to GDELT 5.5s rate-limit sleep)
+               339 raw posts collected
+07:15:50      — TF-IDF semantic filter: 339 → 229 posts (~0.5s, CPU-bound)
+07:15:51      — Time-decay ranking + entity enrichment (~0.1s)
+07:15:51      — TF-IDF deduplication: 229 → 224 clusters (~0.3s)
+07:15:51      — build_summaries(): 20 parallel LLM calls to Bedrock
+07:15:59      — All 20 summaries received (~8s, I/O-bound)
+07:16:00      — SQLite write: 224 posts + 20 summaries (~0.1s)
+07:16:00      — RAG index rebuilt (TF-IDF on 224 posts, ~0.2s)
+07:16:00      — Pipeline complete. Total: ~60 seconds
+```
+
+---
+
+## Getting Started
 
 ### Quick demo (no Docker, no API keys required)
 
@@ -565,14 +908,14 @@ The architectural decision principle illustrated here: **match infrastructure co
 git clone https://github.com/fborbon/social-pulse
 cd social-pulse
 pip install fastapi "uvicorn[standard]" aiohttp feedparser pydantic \
-            pydantic-settings "strawberry-graphql[fastapi]" anthropic \
-            httpx python-dotenv aiofiles
-cp .env.example .env          # optionally add ANTHROPIC_API_KEY
+            pydantic-settings "strawberry-graphql[fastapi]" boto3 \
+            httpx python-dotenv aiofiles scikit-learn numpy aiosqlite apscheduler atproto
+cp .env.example .env          # optionally add AWS credentials for LLM summaries
 python3 demo.py
 # Open http://localhost:8000
 ```
 
-With no `ANTHROPIC_API_KEY` the summary worker falls back to a template string. Add the key to get real Claude summaries.
+Without AWS credentials the summary step falls back to a template string. For LLM summaries, either attach an IAM role (if on EC2) or set `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` in `.env`.
 
 ### Full stack (Docker)
 
@@ -585,22 +928,28 @@ docker compose up --build
 |---|---|
 | `http://localhost:8000` | Dashboard |
 | `http://localhost:8000/graphql` | GraphiQL IDE |
-| `http://localhost:8001/docs` | Collector REST API |
+| `http://localhost:8001/docs` | Collector REST API (FastAPI OpenAPI docs) |
 | `http://localhost:8080` | Kafka UI |
 
 Trigger an immediate collection:
 
 ```bash
-curl -X POST http://localhost:8001/collect/all
+curl -X POST http://localhost:8000/collect/now
 ```
 
 ### Environment variables
 
 | Variable | Required | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | For AI summaries | Claude API key from console.anthropic.com |
+| `AWS_ACCESS_KEY_ID` | For LLM (local only) | Not needed when running on EC2 with IAM role |
+| `AWS_SECRET_ACCESS_KEY` | For LLM (local only) | Not needed when running on EC2 with IAM role |
+| `AWS_REGION` | For LLM | Default: `eu-west-1` |
 | `REDDIT_CLIENT_ID` | For Reddit source | From reddit.com/prefs/apps |
 | `REDDIT_CLIENT_SECRET` | For Reddit source | From reddit.com/prefs/apps |
-| `MASTODON_ACCESS_TOKEN` | For Mastodon source | From your instance settings |
-| `TRACK_TOPICS` | Optional | Comma-separated topic keywords (default provided) |
+| `BLUESKY_HANDLE` | For Bluesky source | e.g. `yourname.bsky.social` |
+| `BLUESKY_APP_PASSWORD` | For Bluesky source | From bsky.app → Settings → App Passwords |
+| `GUARDIAN_API_KEY` | For Guardian source | From open-platform.theguardian.com |
+| `NEWSAPI_KEY` | For NewsAPI source | From newsapi.org |
+| `NYTIMES_API_KEY` | For NY Times source | From developer.nytimes.com |
 | `RSS_FEEDS` | Optional | Comma-separated RSS feed URLs |
+| `BASE_URL` | Production only | Subpath prefix e.g. `/social-pulse` |
