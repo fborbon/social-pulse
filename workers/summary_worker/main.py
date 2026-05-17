@@ -63,26 +63,25 @@ def _build_summary_text(topic: str, posts: list[dict], sentiments: dict) -> str:
 
     try:
         body = _json.dumps({
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 300,
-            "system": (
-                "You are a social media analyst writing concise daily briefings. "
-                "Be factual, neutral, and highlight the most significant stories. "
-                "Write 2-3 sentences maximum."
-            ),
-            "messages": [{"role": "user", "content": (
+            "messages": [{"role": "user", "content": [{"text": (
                 f"Write a daily briefing for the topic '{topic}' based on these "
                 f"{total} posts from today ({pos_pct}% positive, {neu_pct}% neutral, "
                 f"{neg_pct}% negative):\n\n{titles}"
+            )}]}],
+            "system": [{"text": (
+                "You are a social media analyst writing concise daily briefings. "
+                "Be factual, neutral, and highlight the most significant stories. "
+                "Write 2-3 sentences maximum."
             )}],
+            "inferenceConfig": {"maxTokens": 300},
         })
         resp = _bedrock.invoke_model(
-            modelId="anthropic.claude-3-haiku-20240307-v1:0",
+            modelId="eu.amazon.nova-micro-v1:0",
             body=body,
             contentType="application/json",
             accept="application/json",
         )
-        return _json.loads(resp["body"].read())["content"][0]["text"]
+        return _json.loads(resp["body"].read())["output"]["message"]["content"][0]["text"]
     except Exception as e:
         log.warning("Bedrock summary failed: %s", e)
         trending = _trending_words(posts, 5)
