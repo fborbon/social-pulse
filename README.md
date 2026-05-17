@@ -18,6 +18,7 @@ An educational, production-inspired platform that monitors social media and news
 - [Database Schema](#database-schema)
 - [Demo vs Full Stack](#demo-vs-full-stack)
 - [Cost Analysis](#cost-analysis)
+- [Data Coverage & Signal Quality](#data-coverage--signal-quality)
 - [Getting Started](#getting-started)
 
 ---
@@ -897,6 +898,94 @@ At the current traffic level (portfolio project, occasional visitors) outbound s
 07:16:00      — RAG index rebuilt (TF-IDF on 224 posts, ~0.2s)
 07:16:00      — Pipeline complete. Total: ~60 seconds
 ```
+
+---
+
+## Data Coverage & Signal Quality
+
+### Is 300 posts/day enough for a real social pulse?
+
+A typical daily run collects **~309 raw posts** across 13 sources, which after semantic filtering and deduplication yields **~224 unique story clusters** spread across **20 topics**:
+
+```
+309 raw  →  229 on-topic (semantic filter)  →  224 clusters (deduplication)
+                                                       ÷ 20 topics
+                                                  ≈ 11 posts / topic / day
+```
+
+**Short answer: adequate for an educational demo, thin for a production pulse.** The distribution is highly uneven — some topics are well-covered, others are too sparse for meaningful LLM summaries.
+
+### Per-topic signal assessment
+
+| Topic | Typical posts/day | Signal quality |
+|---|---|---|
+| science & environment | 88 | Strong — multiple angles, good LLM input |
+| pets & animal kingdom | 79 | Strong |
+| artificial intelligence | 57 | Strong |
+| health | 31 | Good |
+| social networks | 25 | Adequate |
+| technology | 20 | Adequate |
+| silicon valley | 18 | Adequate |
+| employment & work balance | 15 | Adequate |
+| global warming | 12 | Borderline |
+| politics | 10 | Borderline |
+| sports | 10 | Borderline |
+| lifestyle & human interest | 8 | Thin |
+| music & movies | 6 | Thin — LLM summarises 2–3 headlines |
+| gender equity | 5 | Thin |
+| wall street | 4 | Thin |
+| crime & public safety | 3 | Too sparse — summary is barely more than noise |
+
+With fewer than ~10 posts, a topic briefing is essentially summarising 2–3 coincidental headlines rather than capturing a genuine pulse.
+
+---
+
+### The source mix problem
+
+Volume is only part of the issue. **What** is being collected matters as much as how much.
+
+| Category | Posts/day | Bias |
+|---|---|---|
+| RSS news bundles (BBC, Reuters, NPR, Verge, Ars, TechCrunch…) | ~167 | Broad but editorial — curated by journalists, not public opinion |
+| Tech forums (HackerNews, Lobste.rs, Dev.to, Lemmy) | ~115 | Heavily skewed toward developers and tech enthusiasts |
+| Academic papers (arXiv) | ~21 | Research signal, not public discourse |
+| Regulatory filings (SEC EDGAR, Federal Register) | ~23 | Institutional signal |
+| **Actual social media (Bluesky)** | **0** | Auth not configured |
+| **Reddit** | **0** | Credentials not set — largest gap |
+| Guardian / NewsAPI / NY Times | 0 | API keys not configured |
+
+A genuine "social pulse" should be **majority social media** — real people expressing opinions in real time. The current mix is majority editorial news and tech blogs. That biases every topic toward a tech-literate, English-language, developer-adjacent perspective.
+
+---
+
+### What would actually improve it
+
+| Fix | Effort | Impact | Posts added/day |
+|---|---|---|---|
+| **Reddit** — already coded, needs OAuth credentials (free) | Low | Very high — real public opinion across all 20 topics | +200–500 |
+| **More RSS feeds** — add AP, Al Jazeera, topic-specific feeds | Low | High — broader geographic and editorial coverage | +100–200 |
+| **Guardian or NewsAPI** — free tier API key | Low | High — structured article metadata, better for filtering | +100 |
+| **Bluesky** — fix app-password authentication | Low | Medium — genuine social posts, growing platform | +25–50 |
+| **Mastodon** — already coded, needs access token | Low | Medium — decentralised social, strong for tech/politics | +50 |
+| **GDELT more queries** — currently only 4 topic queries | Low | Medium — global event coverage | +50–100 |
+
+**Single highest-leverage fix: Reddit.** It is already coded in the collector, supports async OAuth via `asyncpraw`, and the free API tier allows several hundred posts per day across diverse subreddits. Activating it would roughly double the daily volume and dramatically improve signal quality for politics, cost of living, sports, health, and lifestyle topics — exactly the topics where HackerNews is nearly silent.
+
+---
+
+### Comparison: demo vs production-grade monitoring
+
+| Dimension | This demo | Production monitoring tool |
+|---|---|---|
+| Posts/day | ~300 | 50,000–5,000,000 |
+| Sources | 13 | 50–200+ |
+| Social media fraction | <5% | 60–80% |
+| Languages | English only | Multi-lingual |
+| Update cadence | Once/day | Continuous (seconds–minutes) |
+| Topics | 20 fixed | Thousands, dynamic |
+| Dedup method | TF-IDF cosine | Near-duplicate hashing + semantic embeddings |
+
+The gap is not a flaw in the architecture — the pipeline design (fetch → filter → enrich → summarise) scales to any volume. The constraint here is purely the choice of free, unauthenticated sources to keep the demo deployable without credentials. Plugging in Reddit, a Twitter/X API key, or a commercial news feed provider would feed the same pipeline with orders-of-magnitude more signal.
 
 ---
 
