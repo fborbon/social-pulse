@@ -11,7 +11,9 @@ from botocore.exceptions import ClientError, NoCredentialsError
 
 log = logging.getLogger(__name__)
 
-MODEL_ID = "anthropic.claude-3-haiku-20240307-v1:0"
+# eu. prefix = cross-region inference profile (routes within EU region group)
+# Claude 3 Haiku (cheaper) is LEGACY/blocked without prior usage history in this account
+MODEL_ID = "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
 REGION   = "eu-west-1"
 
 _client = None
