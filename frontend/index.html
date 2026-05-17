@@ -61,7 +61,22 @@
       Personalized
     </label>
     <span id="ws-badge" class="tag tag-neu">● connecting</span>
-    <button onclick="loadAll()" class="text-sm px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition">Refresh</button>
+    <button onclick="loadAll()" class="text-sm px-4 py-1.5 rounded-lg bg-slate-600 hover:bg-slate-500 text-white transition">Reload</button>
+    <button id="collect-btn" onclick="triggerCollection()" class="text-sm px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition flex items-center gap-2">
+      <span id="collect-icon">⟳</span>
+      <span id="collect-label">Collect Now</span>
+    </button>
+  </div>
+</div>
+
+<!-- Collection progress bar (hidden by default) -->
+<div id="collect-progress" class="hidden mb-4 card p-3">
+  <div class="flex items-center justify-between mb-2">
+    <span class="text-xs text-slate-400">Fetching from 13 sources, filtering, ranking, generating LLM summaries…</span>
+    <span id="collect-elapsed" class="text-xs text-indigo-400 font-mono">0s</span>
+  </div>
+  <div class="w-full bg-slate-700 rounded-full h-1.5">
+    <div id="collect-bar" class="bg-indigo-500 h-1.5 rounded-full transition-all duration-1000" style="width:0%"></div>
   </div>
 </div>
 
@@ -477,7 +492,7 @@ async function runSearch() {
   const data = await api(`/search?q=${encodeURIComponent(q)}`);
   el.innerHTML = `
     <div class="bg-slate-700/40 rounded-lg p-4 mb-4 fade-in">
-      <p class="text-indigo-300 text-xs uppercase tracking-wider mb-2">Claude's Answer</p>
+      <p class="text-indigo-300 text-xs uppercase tracking-wider mb-2">LLM Answer</p>
       <p class="text-slate-200 text-sm leading-relaxed">${data.answer || 'No answer generated.'}</p>
     </div>
     ${data.sources?.length ? `
@@ -546,6 +561,52 @@ function connectLive() {
     ticker.prepend(el);
     if(ticker.children.length>30) ticker.lastChild?.remove();
   };
+}
+
+// ── Manual collection trigger ─────────────────────────────────────────────────
+async function triggerCollection() {
+  const btn    = document.getElementById('collect-btn');
+  const icon   = document.getElementById('collect-icon');
+  const label  = document.getElementById('collect-label');
+  const bar    = document.getElementById('collect-bar');
+  const elapsed= document.getElementById('collect-elapsed');
+  const prog   = document.getElementById('collect-progress');
+
+  btn.disabled = true;
+  btn.classList.add('opacity-60', 'cursor-not-allowed');
+  icon.style.display = 'inline-block';
+  icon.style.animation = 'spin .8s linear infinite';
+  label.textContent = 'Collecting…';
+  prog.classList.remove('hidden');
+  bar.style.width = '0%';
+
+  const DURATION = 100; // expected seconds
+  const start = Date.now();
+  const timer = setInterval(() => {
+    const s = Math.floor((Date.now() - start) / 1000);
+    elapsed.textContent = s + 's';
+    bar.style.width = Math.min(95, Math.round(s / DURATION * 100)) + '%';
+  }, 1000);
+
+  try {
+    await fetch(API('/collect/now'), { method: 'POST' });
+    // Wait for pipeline to complete (~100s), then reload
+    await new Promise(r => setTimeout(r, DURATION * 1000));
+    bar.style.width = '100%';
+    await loadAll();
+  } catch (e) {
+    console.error('Collection failed:', e);
+  } finally {
+    clearInterval(timer);
+    setTimeout(() => {
+      prog.classList.add('hidden');
+      bar.style.width = '0%';
+    }, 1500);
+    btn.disabled = false;
+    btn.classList.remove('opacity-60', 'cursor-not-allowed');
+    icon.style.animation = '';
+    label.textContent = 'Collect Now';
+  }
 }
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
