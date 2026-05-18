@@ -1,4 +1,4 @@
-# Social Pulse Analyzer
+# Social Pulse
 
 An educational, production-inspired platform that monitors social media and news sources, enriches posts with automated sentiment analysis and TF-IDF semantic filtering, and generates AI-written daily briefings via an LLM. The full stack streams events through Apache Kafka across five independent services; the deployed demo collapses the same pipeline into a single FastAPI process with SQLite persistence, making it runnable on any machine without Docker.
 
