@@ -12,18 +12,19 @@ An educational, production-inspired platform that monitors social media and news
 
 ## Table of Contents
 
-- [Architecture Overview](#architecture-overview)
-- [Data Processing Pipeline](#data-processing-pipeline)
-- [Data Flow Diagram](#data-flow-diagram)
-- [FastAPI — the Core Framework](#fastapi--the-core-framework)
-- [Technologies](#technologies)
-- [Libraries](#libraries)
-- [AI & Machine Learning](#ai--machine-learning)
-- [Database Schema](#database-schema)
-- [Demo vs Full Stack](#demo-vs-full-stack)
-- [Cost Analysis](#cost-analysis)
-- [Data Coverage & Signal Quality](#data-coverage--signal-quality)
-- [Getting Started](#getting-started)
+1. [Architecture Overview](#architecture-overview)
+2. [Data Processing Pipeline](#data-processing-pipeline)
+3. [Data Flow Diagram](#data-flow-diagram)
+4. [FastAPI — the Core Framework](#fastapi--the-core-framework)
+5. [Technologies](#technologies)
+6. [Libraries](#libraries)
+7. [AI & Machine Learning](#ai--machine-learning)
+8. [Database Schema](#database-schema)
+9. [Demo vs Full Stack](#demo-vs-full-stack)
+10. [Cost Analysis](#cost-analysis)
+11. [Data Coverage & Signal Quality](#data-coverage--signal-quality)
+12. [Getting Started](#getting-started)
+13. [Auditing](#auditing)
 
 ---
 
