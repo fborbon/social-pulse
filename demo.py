@@ -774,6 +774,7 @@ def build_summaries(posts: list[dict]) -> dict:
 
 DB_POSTS:     list[dict]       = []
 DB_SUMMARIES: dict[str, dict]  = {}
+_last_run:    str | None       = None   # UTC datetime of last completed collection run
 
 
 # ── 9. GraphQL schema ─────────────────────────────────────────────────────────
@@ -968,7 +969,7 @@ async def _fetch_all_sources() -> list[dict]:
 
 async def run_collection() -> None:
     """Full pipeline — called at startup and by the daily scheduler."""
-    global DB_POSTS, DB_SUMMARIES
+    global DB_POSTS, DB_SUMMARIES, _last_run
     print(f"\n{'─'*50}", flush=True)
     print(f"Collection run at {datetime.now(timezone.utc).isoformat()}", flush=True)
 
@@ -983,6 +984,7 @@ async def run_collection() -> None:
         DB_SUMMARIES.clear()
         DB_SUMMARIES.update(cached_summaries)
         demo_rag.init_rag(DB_POSTS)
+        _last_run = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         print("  Ready (from cache)\n", flush=True)
         return
 
@@ -1008,6 +1010,7 @@ async def run_collection() -> None:
     await demo_db.save_posts(deduped)
     await demo_db.save_summaries(summaries)
     demo_rag.init_rag(DB_POSTS)
+    _last_run = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     print(f"  Persisted to DB. Ready!\n", flush=True)
 
 
@@ -1043,6 +1046,7 @@ app.mount("/static", StaticFiles(directory=Path(__file__).parent / "frontend"), 
 @app.get("/health")
 def health():
     return {"status": "ok", "posts": len(DB_POSTS), "topics": list(DB_SUMMARIES.keys()),
+            "last_run": _last_run,
             "next_run": str(_scheduler.get_jobs()[0].next_run_time) if _scheduler.get_jobs() else None}
 
 

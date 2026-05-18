@@ -619,7 +619,13 @@ async function loadAll() {
   const stats = statsRes.data?.topicStats ?? [];
   const posts = postsRes.data?.posts ?? [];
 
-  document.getElementById('last-updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
+  fetch((window.BASE_URL || '') + '/health')
+    .then(r => r.json())
+    .then(h => {
+      const el = document.getElementById('last-updated');
+      if (el) el.textContent = h.last_run ? 'Last collection: ' + h.last_run : '';
+    })
+    .catch(() => {});
   renderStatCards(stats, posts, spikes);
   renderTopicChart(stats);
   populateTopicSelects(stats);
