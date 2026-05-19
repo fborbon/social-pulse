@@ -25,6 +25,7 @@ An educational, production-inspired platform that monitors social media and news
 11. [Data Coverage & Signal Quality](#data-coverage--signal-quality)
 12. [Getting Started](#getting-started)
 13. [Auditing](#auditing)
+14. [CI/CD](#cicd)
 
 ---
 
@@ -1078,3 +1079,65 @@ This section provides a structured checklist for review by an IT expert and a da
 | Signal quality | <5% actual social media; developer-biased sources. Highest-leverage fix (Reddit) is correctly identified. | |
 | Other | No failure alerting. GDELT rate-limit adds 50s to collection. Once-daily cadence misses intra-day spikes. | |
 
+
+---
+
+## CI/CD
+
+### What is CI/CD?
+
+**CI/CD** stands for **Continuous Integration / Continuous Deployment**. It is a software engineering practice that automates the steps of verifying, packaging, and releasing code whenever a change is pushed to the repository.
+
+- **Continuous Integration (CI)** — each push triggers automated checks that confirm the change doesn't break the codebase.
+- **Continuous Deployment (CD)** — once checks pass, the new version is automatically shipped to the live environment with no manual steps.
+
+### Key Benefits
+
+| Benefit | Description |
+|---|---|
+| **Speed** | Changes go live in seconds, not hours |
+| **Consistency** | Every deploy follows the exact same steps — no human error |
+| **Safety** | Broken code is caught before it reaches production |
+| **Traceability** | Every deployment is linked to a specific commit and author |
+| **Zero-downtime iterations** | Small frequent releases are safer than large rare ones |
+
+### How it is applied here
+
+Social Pulse runs as a **systemd service** (`social-pulse.service`) on a shared EC2 instance (`t3.small`, `eu-west-1`). The app is installed at `/opt/social-pulse`. On every push to `main`, GitHub Actions SSH-es into the EC2, resets the code to match the repo, reinstalls Python dependencies, and restarts the service — the health endpoint at `/social-pulse/health` confirms it came back up.
+
+**Trigger:** push to `main`
+**Runner:** `ubuntu-latest` (GitHub-hosted)
+**Secrets required:** `EC2_HOST`, `EC2_USER`, `EC2_SSH_KEY`
+
+### Implementation Diagram
+
+```mermaid
+flowchart TD
+    DEV([👨‍💻 Developer\npushes to main])
+    GH[GitHub repository\nfborbon/social-pulse]
+    GA[GitHub Actions\nubuntu-latest runner]
+    SSH[appleboy/ssh-action\nSSH connection]
+    EC2[EC2 t3.small\n54.78.82.101]
+    FETCH[git fetch origin main]
+    RESET[git reset --hard origin/main]
+    PIP[pip3 install packages\n--break-system-packages]
+    RESTART[sudo systemctl restart\nsocial-pulse]
+    CHECK[systemctl is-active check]
+    DONE[✅ Live at\n/social-pulse/]
+
+    DEV --> GH
+    GH --> GA
+    GA --> SSH
+    SSH -->|authenticated via\nEC2_SSH_KEY secret| EC2
+    EC2 --> FETCH
+    FETCH --> RESET
+    RESET --> PIP
+    PIP --> RESTART
+    RESTART --> CHECK
+    CHECK --> DONE
+
+    style DEV fill:#4a90d9,color:#fff
+    style DONE fill:#27ae60,color:#fff
+    style EC2 fill:#e67e22,color:#fff
+    style RESTART fill:#c0392b,color:#fff
+```
