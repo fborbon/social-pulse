@@ -24,8 +24,13 @@ jobs:
           script: |
             set -e
             cd /opt/social-pulse
-            git pull origin main
-            pip3 install -r requirements.txt --quiet --break-system-packages
+            git fetch origin main
+            git reset --hard origin/main
+            pip3 install --quiet --break-system-packages \
+              fastapi "uvicorn[standard]" aiohttp feedparser pydantic \
+              pydantic-settings "strawberry-graphql[fastapi]" anthropic \
+              httpx python-dotenv aiofiles aiosqlite apscheduler \
+              scikit-learn numpy atproto
             sudo systemctl restart social-pulse
             sleep 3
             sudo systemctl is-active social-pulse
