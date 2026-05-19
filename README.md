@@ -1077,3 +1077,4 @@ This section provides a structured checklist for review by an IT expert and a da
 | AI / ML model adequacy | Nova Micro is cost-optimal for short briefings. TF-IDF threshold is empirically tuned. Lexicon sentiment is a documented swap point. | |
 | Signal quality | <5% actual social media; developer-biased sources. Highest-leverage fix (Reddit) is correctly identified. | |
 | Other | No failure alerting. GDELT rate-limit adds 50s to collection. Once-daily cadence misses intra-day spikes. | |
+
