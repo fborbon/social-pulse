@@ -39,6 +39,13 @@ jobs:
               httpx python-dotenv aiofiles aiosqlite apscheduler \
               scikit-learn numpy atproto
             sudo systemctl restart social-pulse
-            sleep 3
+            # Startup runs a full collection cycle before Uvicorn binds the port
+            # (takes ~2min), so a fixed short sleep + is-active reports "success"
+            # while the app is still unreachable. Poll the real health endpoint.
+            for i in $(seq 1 40); do
+              curl -sf http://127.0.0.1:8000/health >/dev/null 2>&1 && break
+              sleep 5
+            done
             sudo systemctl is-active social-pulse
+            curl -sf http://127.0.0.1:8000/health >/dev/null || { echo "✗ Health check failed after restart"; exit 1; }
             echo "✓ Social Pulse deployed at $(date -u)"
