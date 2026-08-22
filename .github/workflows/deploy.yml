@@ -8,6 +8,7 @@ name: Deploy
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -24,8 +25,14 @@ jobs:
           script: |
             set -e
             cd /opt/social-pulse
+            # social_pulse.db is live collection data — it must never be reset to
+            # the stale git-committed copy. Back it up and restore it around the
+            # reset so a deploy can never wipe live data (same class of incident
+            # that once destroyed cv-builder's live data/cv.json).
+            [ -f social_pulse.db ] && cp social_pulse.db /tmp/social_pulse.db.deploy-backup
             git fetch origin main
             git reset --hard origin/main
+            [ -f /tmp/social_pulse.db.deploy-backup ] && mv /tmp/social_pulse.db.deploy-backup social_pulse.db
             pip3 install --quiet --break-system-packages \
               fastapi "uvicorn[standard]" aiohttp feedparser pydantic \
               pydantic-settings "strawberry-graphql[fastapi]" anthropic \
