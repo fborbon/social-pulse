@@ -6,7 +6,6 @@ set -euo pipefail
 REPO="https://github.com/fborbon/social-pulse"
 INSTALL_DIR="/opt/social-pulse"
 SERVICE="social-pulse"
-NGINX_SITE="/etc/nginx/sites-available/forwardforecasting"
 
 echo "=== Social Pulse installer ==="
 
@@ -44,28 +43,10 @@ sudo systemctl daemon-reload
 sudo systemctl enable $SERVICE
 
 # ── 5. nginx location block ───────────────────────────────────────────────────
-echo "[5/6] Patching nginx config..."
-BLOCK='
-    # Social Pulse dashboard — injected by install.sh
-    location /social-pulse/ {
-        proxy_pass         http://127.0.0.1:8000/;
-        proxy_http_version 1.1;
-        proxy_set_header   Upgrade    \$http_upgrade;
-        proxy_set_header   Connection "upgrade";
-        proxy_set_header   Host       \$host;
-        proxy_set_header   X-Real-IP  \$remote_addr;
-        proxy_read_timeout 3600;
-        proxy_send_timeout 3600;
-    }'
-
-if grep -q "social-pulse" "$NGINX_SITE" 2>/dev/null; then
-  echo "      nginx block already present, skipping."
-else
-  # Insert before the closing brace of the server block
-  sudo sed -i "s|}$|${BLOCK}\n}|" "$NGINX_SITE"
-fi
-
-sudo nginx -t && sudo systemctl reload nginx
+# The /social-pulse/ locations (including the login-protected /collect/now and the rate-limited
+# /search) live in the main-site config owned by the sp500-correlation-bot repo
+# (nginx/forwardforecasting.conf, installed with a drift guard). Never patch the live file here.
+echo "[5/6] nginx: managed by the main-site config repo, nothing to do."
 
 # ── 6. Start service ──────────────────────────────────────────────────────────
 echo "[6/6] Starting Social Pulse..."
