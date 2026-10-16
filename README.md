@@ -4,9 +4,11 @@ An educational, production-inspired platform that monitors social media and news
 
 **Main technologies:** Python · FastAPI + Uvicorn (ASGI) · Apache Kafka + aiokafka · AWS Bedrock (Amazon Nova Micro) · scikit-learn (TF-IDF) · Strawberry GraphQL · SQLite / PostgreSQL · APScheduler · Chart.js · D3.js
 
-**Monthly cost:** ~$18.43/month (shared EC2 t3.small + $0.03/month Bedrock AI). Full breakdown in the [Cost Analysis](#cost-analysis) section.
+**Status (October 2026):** the stand-alone live demo has been **retired**. Its user-facing features (the ranked post feed, the daily AI briefings and the RAG search) were folded into a tab of the portfolio's daily global news site: [forwardforecasting.eu/global-news-agent, Social Pulse tab](https://www.forwardforecasting.eu/global-news-agent/index.html#tab-social). There they run inside an existing once-a-day batch job, with the search on AWS Lambda, instead of a service holding ~150 MB of RAM around the clock. The old `/social-pulse/` URL redirects to that tab.
 
-**Live demo:** [https://www.forwardforecasting.eu/social-pulse/](https://www.forwardforecasting.eu/social-pulse/)
+This repository stays public as the **reference implementation** of the event-driven version: Kafka, five services, GraphQL, WebSocket streaming, Docker Compose and Kubernetes manifests. Everything below documents it as built; the cost and CI/CD sections describe the retired deployment.
+
+**Monthly cost:** $0 now (nothing deployed). While it ran: ~$18.43/month (shared EC2 t3.small + $0.03/month Bedrock AI). Full breakdown in the [Cost Analysis](#cost-analysis) section.
 
 ---
 
@@ -745,7 +747,9 @@ The full stack requires **8× more RAM** than the demo. This is almost entirely 
 
 ## Cost Analysis
 
-All costs are for the **AWS eu-west-1 (Ireland)** region where this project is deployed. Prices are as of 2025; AWS on-demand rates. The demo runs on a **t3.small** EC2 instance shared with a portfolio website.
+> Historical: these figures describe the deployment that ran until October 2026. The repository is no longer deployed anywhere.
+
+All costs are for the **AWS eu-west-1 (Ireland)** region where this project was deployed. Prices are as of 2025; AWS on-demand rates. The demo runs on a **t3.small** EC2 instance shared with a portfolio website.
 
 ### Pipeline execution profile
 
@@ -1103,7 +1107,9 @@ This section provides a structured checklist for review by an IT expert and a da
 
 ### How it is applied here
 
-Social Pulse runs as a **systemd service** (`social-pulse.service`) on a shared EC2 instance (`t3.small`, `eu-west-1`). The app is installed at `/opt/social-pulse`. On every push to `main`, GitHub Actions SSH-es into the EC2, resets the code to match the repo, reinstalls Python dependencies, and restarts the service — the health endpoint at `/social-pulse/health` confirms it came back up.
+> Retired: the deploy workflow was removed in October 2026 together with the live demo, so pushes no longer deploy anything. The description below is kept for reference.
+
+Social Pulse ran as a **systemd service** (`social-pulse.service`) on a shared EC2 instance (`t3.small`, `eu-west-1`). The app is installed at `/opt/social-pulse`. On every push to `main`, GitHub Actions SSH-es into the EC2, resets the code to match the repo, reinstalls Python dependencies, and restarts the service — the health endpoint at `/social-pulse/health` confirms it came back up.
 
 **Trigger:** push to `main`
 **Runner:** `ubuntu-latest` (GitHub-hosted)
